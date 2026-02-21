@@ -16,7 +16,7 @@ output: html_document
     # Use pacman to install and loac all packages
       pacman::p_load(dynamicSDM, rgbif, dplyr, purrr, tidyverse, lubridate,
                      geodata, leaflet, terra, sf, ecospat, biomod2, maxnet,
-                     furrr, future, progressr, ohvbd) 
+                     furrr, future, progressr, ohvbd, tidyterra) 
 
 
 ```
@@ -545,7 +545,7 @@ output: html_document
   # Calculate spatiotemporal metrics for each species
     spatiotemporal_assessment <- unified_vector_data_corrected |>
       dplyr::mutate(
-        year = as.integer(year),
+        year = lubridate::year(date),
         month = format(date, "%m"),
         year_month = format(date, "%Y-%m")
       ) |>
@@ -573,8 +573,10 @@ output: html_document
     monthly_coverage <- unified_vector_data_corrected |>
       dplyr::mutate(
         month = format(date, "%m"),
-        month_name = factor(month_name, 
-                           levels = month.name)
+        month_name = factor(
+          month.name[as.numeric(month)], 
+          levels = month.name
+        )
       ) |>
       dplyr::group_by(species, month, month_name) |>
       dplyr::summarise(
@@ -984,9 +986,6 @@ output: html_document
   
 
 ```
-
-
-
 
 
 
@@ -3568,52 +3567,200 @@ set.seed(1999)
 
 ```{r Species Distribution Maps — Baseline Mean Suitability}
 
-  distribution_maps <- list.files(BASELINE_DIR, pattern = "\\.tif$", full.names = TRUE) |>
-  	set_names(
-  		list.files(BASELINE_DIR, pattern = "\\.tif$") |>
-  			stringr::str_remove("_baseline\\.tif$") |>
-  			stringr::str_replace_all("_", " ")
-  	) |>
-  	map(function(tif_path) {
-  
-  		mean_rast        <- rast(tif_path)[[1]]
-  		names(mean_rast) <- "suitability"
-  		mean_rast        <- clamp(mean_rast, lower = 0, upper = 1)
-  
-  		sp_label <- tif_path |>
-  			basename() |>
-  			stringr::str_remove("_baseline\\.tif$") |>
-  			stringr::str_replace_all("_", " ")
-  
-  		ggplot() +
-  			geom_spatraster(data = mean_rast) +
-  			geom_sf(data = georgia_outline, fill = NA, colour = "grey30", linewidth = 0.4) +
-  			scale_fill_viridis_c(
-  				option    = "mako",
-  				name      = "Suitability",
-  				limits    = c(0, 1),
-  				breaks    = seq(0, 1, by = 0.25),
-  				na.value  = "transparent",
-  				direction = -1
-  			) +
-  			labs(
-  				title    = bquote(italic(.(sp_label))),
-  				subtitle = "Baseline mean habitat suitability"
-  			) +
-  			theme_void(base_size = 11) +
-  			theme(
-  				plot.title        = element_text(hjust = 0.5, face = "bold.italic",
-  				                                 margin = ggplot2::margin(b = 2)),
-  				plot.subtitle     = element_text(hjust = 0.5, size = 8, colour = "grey40",
-  				                                 margin = ggplot2::margin(b = 6)),
-  				legend.position   = "bottom",
-  				legend.key.width  = unit(2.5, "cm"),
-  				legend.key.height = unit(0.3, "cm"),
-  				plot.margin       = ggplot2::margin(4, 4, 4, 4)
-  			)
-  	})
-  
-  distribution_maps
+# Convert once outside the map2() call to avoid repeated conversion overhead
+Georgia_adm2_sf <- sf::st_as_sf(Georgia_adm2)
+
+map_pairs <- purrr::map2(
+    tif_files,
+    sp_labels,
+    function(tif_path, sp_label) {
+
+        mean_rast        <- rast(tif_path)[[1]]
+        names(mean_rast) <- "suitability"
+        mean_rast        <- clamp(mean_rast, lower = 0, upper = 1)
+
+        # exact_extract requires an sf object, not SpatVector
+        zonal_df <- exactextractr::exact_extract(
+            mean_rast,
+            Georgia_adm2_sf,
+            fun         = "mean",
+            append_cols = "NAME_2",
+            progress    = FALSE
+        ) |>
+            dplyr::rename(mean_suit = mean)
+
+        Georgia_zonal <- Georgia_adm2_sf |>
+            dplyr::left_join(zonal_df, by = "NAME_2")
+
+        p_viridis <- ggplot() +
+            tidyterra::geom_spatraster(data = mean_rast) +
+            geom_sf(data = Georgia_adm2_sf, fill = NA, colour = "grey30", linewidth = 0.4) +
+            scale_fill_viridis_c(
+                option   = "viridis",
+                name     = "Suitability",
+                limits   = c(0, 1),
+                breaks   = seq(0, 1, by = 0.25),
+                na.value = "transparent"
+            ) +
+            labs(
+                title    = bquote(italic(.(sp_label))),
+                subtitle = "Baseline mean habitat suitability"
+            ) +
+            .map_theme()
+
+        p_zonal <- ggplot() +
+            geom_sf(
+                data      = Georgia_zonal,
+                mapping   = aes(fill = mean_suit),
+                colour    = "grey30",
+                linewidth = 0.4
+            ) +
+            scale_fill_viridis_c(
+                option   = "viridis",
+                name     = "Mean\nsuitability",
+                limits   = c(0, 1),
+                breaks   = seq(0, 1, by = 0.25),
+                na.value = "grey85"
+            ) +
+            labs(
+                title    = bquote(italic(.(sp_label))),
+                subtitle = "Baseline mean suitability by municipality"
+            ) +
+            .map_theme()
+
+        list(viridis = p_viridis, zonal = p_zonal)
+    }
+)
+
+distribution_maps_viridis <- purrr::map(map_pairs, "viridis") |> purrr::set_names(sp_labels)
+distribution_maps_zonal   <- purrr::map(map_pairs, "zonal")   |> purrr::set_names(sp_labels)
+
+
+EXPORT_DIR <- r"(C:\Users\ianpsheasmith\OneDrive - University of Florida\General - Georgia Ticks\Georgia_Ticks\Paper2_Data\Predictions\ESM_BRT_Updated_Predictions)"
+
+purrr::walk2(
+    distribution_maps_zonal,
+    names(distribution_maps_zonal),
+    function(plot, sp_label) {
+
+        # Strip titles and legend from the existing plot at export time
+        p_export <- plot +
+            labs(title = NULL, subtitle = NULL) +
+            theme(legend.position = "none")
+
+        # Replace spaces with underscores for a clean filename
+        filename <- file.path(
+            EXPORT_DIR,
+            paste0(stringr::str_replace_all(sp_label, " ", "_"), "_zonal.svg")
+        )
+
+        ggplot2::ggsave(
+            filename = filename,
+            plot     = p_export,
+            device   = "svg",
+            width    = 6,
+            height   = 4,
+            units    = "in"
+        )
+    }
+)
+
+
+# Genera used to classify mosquitoes
+MOSQUITO_GENERA <- c("Aedes", "Culex", "Anopheles", "Culiseta")
+
+is_mosquito <- function(sp_label) stringr::word(sp_label, 1) %in% MOSQUITO_GENERA
+
+# ── Build a long sf object with mean suitability for all species ───────────────
+# Reuses the same extraction logic, producing one row per municipality per species
+zonal_long <- purrr::map2(
+    tif_files,
+    sp_labels,
+    function(tif_path, sp_label) {
+
+        mean_rast        <- rast(tif_path)[[1]]
+        names(mean_rast) <- "suitability"
+        mean_rast        <- clamp(mean_rast, lower = 0, upper = 1)
+
+        exactextractr::exact_extract(
+            mean_rast,
+            Georgia_adm2_sf,
+            fun         = "mean",
+            append_cols = "NAME_2",
+            progress    = FALSE
+        ) |>
+            dplyr::rename(mean_suit = mean) |>
+            dplyr::mutate(species = sp_label)
+    }
+) |>
+    dplyr::bind_rows() |>
+    dplyr::left_join(Georgia_adm2_sf, by = "NAME_2") |>
+    sf::st_as_sf()
+
+# ── Split into mosquito and tick subsets ──────────────────────────────────────
+mosquito_long <- zonal_long |> dplyr::filter(purrr::map_lgl(species, is_mosquito))
+tick_long     <- zonal_long |> dplyr::filter(!purrr::map_lgl(species, is_mosquito))
+
+.build_facet_panel <- function(data_long, strip_fill = "grey95", ncol = 4) {
+
+    data_long <- data_long |>
+        dplyr::mutate(species = stringr::str_replace(species, " ", "\n"))
+
+    ggplot(data_long) +
+        geom_sf(aes(fill = mean_suit), colour = NA) +
+        scale_fill_viridis_c(
+            option   = "viridis",
+            limits   = c(0, 1),
+            breaks   = seq(0, 1, by = 0.25),
+            na.value = "grey85",
+            guide    = "none"
+        ) +
+        facet_wrap(~ species, ncol = ncol) +
+        theme_void(base_size = 11) +
+        theme(
+            strip.background = element_rect(fill = strip_fill, colour = "grey70",
+                                            linewidth = 0.5),
+            strip.text       = element_text(face = "bold.italic", size = 7.5,  # reduced from 8.5
+                                            lineheight = 1.15,
+                                            margin = ggplot2::margin(t = 3, b = 3,
+                                                                     l = 6, r = 6)),  # wider l/r padding widens boxes uniformly
+            strip.clip       = "off",
+            panel.border     = element_rect(fill = NA, colour = "grey70",
+                                            linewidth = 0.5),
+            panel.spacing    = unit(0.25, "cm"),   # reduced from 0.5
+            plot.margin      = ggplot2::margin(4, 4, 4, 4)  # reduced from 8
+        )
+}
+
+# ── Reassemble with corrected groupings ───────────────────────────────────────
+mosquito_figure <- .build_facet_panel(mosquito_long, strip_fill = "#e6f2ff")
+tick_figure     <- .build_facet_panel(tick_long,     strip_fill = "#e6ffe6")
+
+mosquito_figure
+tick_figure
+
+# ── Export ────────────────────────────────────────────────────────────────────
+purrr::walk2(
+    list(mosquito_figure,     tick_figure),
+    c("mosquito_zonal_panel", "tick_zonal_panel"),
+    function(fig, fname) {
+
+        n_panels <- if (stringr::str_detect(fname, "mosquito")) {
+            length(unique(mosquito_long$species))
+        } else {
+            length(unique(tick_long$species))
+        }
+
+        ggplot2::ggsave(
+            filename = file.path(EXPORT_DIR, paste0(fname, ".svg")),
+            plot     = fig,
+            device   = "svg",
+            width    = 14,
+            height   = ceiling(n_panels / 4) * 4.5,
+            units    = "in"
+        )
+    }
+)
 ```
 
 
@@ -3635,7 +3782,6 @@ set.seed(1999)
 
 
 ```{r}
-
 
 ```
 
