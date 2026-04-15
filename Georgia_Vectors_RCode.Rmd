@@ -16,7 +16,8 @@ output: html_document
       pacman::p_load(dynamicSDM, rgbif, dplyr, purrr, tidyverse, lubridate,
                      geodata, leaflet, terra, sf, ecospat, biomod2, maxnet,
                      furrr, future, progressr, ohvbd, tidyterra, dismo, gbm,
-                     exactextractr, readxl, httr, glue, rgeoda, truncnorm)
+                     exactextractr, readxl, httr, glue, rgeoda, truncnorm,
+                     viridis, blockCV)
 
 ```
 
@@ -26,15 +27,15 @@ output: html_document
     species_list <- c(
       "Aedes aegypti",
       "Aedes albopictus",
-      "Aedes geniculatus",
+      #"Aedes geniculatus",
       "Aedes vexans",
-      "Aedes caspius",
+      #"Aedes caspius",
       "Culex pipiens",
       "Culex theileri",
-      "Culex hortensis",
+      #"Culex hortensis",
       "Culex tritaeniorhynchus",
       "Culiseta annulata",
-      "Culiseta longiareolata",
+      #"Culiseta longiareolata",
       "Ixodes ricinus",
       "Dermacentor reticulatus",
       "Haemaphysalis inermis",
@@ -42,8 +43,8 @@ output: html_document
       "Rhipicephalus sanguineus",
       "Hyalomma marginatum",
       "Hyalomma aegyptium",
-      "Anopheles claviger",
-      "Anopheles hyrcanus",
+      #"Anopheles claviger",
+      #"Anopheles hyrcanus",
       "Anopheles maculipennis",
       "Anopheles plumbeus",
       "Anopheles sacharovi"
@@ -92,23 +93,6 @@ output: html_document
     
     print(species_summary)
 
-  # Register derived dataset and obtain citable DOI
-  derived_doi <- derived_dataset(
-    citation_data = citation_data,
-    title = "Vector arthropod occurrence records in Georgia (Country)",
-    description = paste(
-      "Derived dataset of mosquito and tick occurrence records from Georgia,",
-      "filtered from GBIF download doi:10.15468/dl.csfwn3,",
-      format(Sys.Date(), "%Y-%m-%d")
-    ),
-    source_url = "https://doi.org/10.15468/dl.csfwn3",
-    gbif_download_doi = "10.15468/dl.csfwn3",
-    user = "ianpsheasmith",
-    pwd = "Is#38123"
-  )
-  
-  # Print the derived dataset DOI
-  print(derived_doi)
 ```
 
 ```{r Load in VectorMap Data}
@@ -377,25 +361,25 @@ output: html_document
 
 ```
 
-```{r Extract Unique Observations for the original 22 Target Species}
+```{r Extract Unique Observations for the target species}
 
   # Define the 22 unique vector species of interest
     target_species <- c(
       "Aedes aegypti",
       "Aedes albopictus",
-      "Aedes geniculatus",
+      #"Aedes geniculatus",
       "Aedes vexans",
       "Aedes caspius",
       "Culex pipiens",
       "Culex tritaeniorhynchus",
       "Culex theileri",
       "Culiseta annulata",
-      "Culex hortensis",
-      "Culiseta longiareolata",
+      #"Culex hortensis",
+      #"Culiseta longiareolata",
       "Anopheles sacharovi",
       "Anopheles maculipennis",
       "Anopheles plumbeus",
-      "Anopheles hyrcanus",
+      #"Anopheles hyrcanus",
       "Ixodes ricinus",
       "Dermacentor reticulatus",
       "Haemaphysalis inermis",
@@ -420,6 +404,99 @@ output: html_document
       level = 2, 
       path = "C:/Users/ianpsheasmith/Documents/GitHub/GeorgiaVectors/Shapefiles"
   )
+
+```
+
+```{r Canonical Municipality Boundaries}
+
+  # Set the municipalities and boundaries for Georgia explicitly
+
+  ## Unzip the GeoJSON archive
+    geojson_zip <- "C:/Users/ianpsheasmith/Documents/GitHub/GVecVuln/data/geo_admin_boundaries.geojson.zip"
+    temp_dir    <- tempdir()
+    unzip(geojson_zip, exdir = temp_dir, overwrite = TRUE)
+
+  ## Read all three administrative levels
+    georgia_admin0 <- st_read(file.path(temp_dir, "geo_admin0.geojson"), quiet = TRUE)
+    georgia_admin1 <- st_read(file.path(temp_dir, "geo_admin1.geojson"), quiet = TRUE)
+    georgia_admin2 <- st_read(file.path(temp_dir, "geo_admin2.geojson"), quiet = TRUE)
+
+  ## ── Name mapping: GeoJSON adm2_name → SVI municipality slug ──────────────
+    name_mapping <- c(
+        ## City units → parent municipality
+        "Akhaltsikhe City" = "axalcixe",    "Akhaltsikhe"  = "axalcixe",
+        "Ambrolauri City"  = "ambrolauri",   "Ambrolauri"   = "ambrolauri",
+        "Gori City"        = "gori",         "Gori"         = "gori",
+        "Mtskheta City"    = "mcxeta",       "Mtskheta"     = "mcxeta",
+        "Ozurgeti City"    = "ozurgeti",     "Ozurgeti"     = "ozurgeti",
+        "Telavi City"      = "telavi",       "Telavi"       = "telavi",
+        "Zugdidi City"     = "zugdidi",      "Zugdidi"      = "zugdidi",
+        ## Self-governing cities
+        "Batumi"  = "batumi",  "Kutaisi" = "kutaisi",
+        "Poti"    = "poti",    "Rustavi" = "rustavi",
+        ## Romanisation differences
+        "Akhmeta"        = "axmeta",        "Khashuri"       = "xashuri",
+        "Kharagauli"     = "xaragauli",     "Khobi"          = "xobi",
+        "Khulo"          = "xulo",          "Khelvachauri"   = "xelvachauri",
+        "Khoni"          = "khoni",         "Dedoplistskaro" = "dedofliswyaro",
+        "Kvareli"        = "yvareli",       "Tetritskaro"    = "tetriwyaro",
+        "Tskaltubo"      = "wyaltubo",      "Tsageri"        = "cageri",
+        "Tsalenjikha"    = "walenjixa",     "Tsalka"         = "walka",
+        "Chkhorotsku"    = "chxorowyu",     "Baghdati"       = "bagdadi",
+        "Bagdati"        = "bagdadi",       "Kareli"         = "qareli",
+        "Qareli"         = "qareli",        "Sighnaghi"      = "signagi",
+        "Signagi"        = "signagi",       "Ninotsminda"    = "ninowminda",
+        "Tkibuli"        = "tyibuli",       "Zestaponi"      = "zestafoni",
+        "Kazbegi"        = "yazbegi",
+        ## Direct matches
+        "Abasha"      = "abasha",      "Adigeni"     = "adigeni",
+        "Aspindza"    = "aspindza",     "Akhalkalaki" = "axalqalaqi",
+        "Bolnisi"     = "bolnisi",      "Borjomi"     = "borjomi",
+        "Chiatura"    = "chiatura",     "Chokhatauri" = "choxatauri",
+        "Dmanisi"     = "dmanisi",      "Dusheti"     = "dusheti",
+        "Gardabani"   = "gardabani",    "Gurjaani"    = "gurjaani",
+        "Kaspi"       = "kaspi",        "Lagodekhi"   = "lagodexi",
+        "Lanchkhuti"  = "lanchxuti",    "Lentekhi"    = "lentexi",
+        "Marneuli"    = "marneuli",     "Martvili"    = "martvili",
+        "Mestia"      = "mestia",       "Oni"         = "oni",
+        "Keda"        = "qeda",         "Kobuleti"    = "qobuleti",
+        "Sachkhere"   = "sachxere",     "Sagarejo"    = "sagarejo",
+        "Samtredia"   = "samtredia",    "Senaki"      = "senaki",
+        "Shuakhevi"   = "shuaxevi",     "Terjola"     = "terjola",
+        "Tianeti"     = "tianeti",       "Vani"        = "vani"
+    )
+
+  ## ── Map names and extract Tbilisi from admin1 ────────────────────────────
+    georgia_admin2_mapped <- georgia_admin2 |>
+        mutate(
+            municipality_mapped = dplyr::case_when(
+                adm2_name %in% names(name_mapping) ~ name_mapping[adm2_name],
+                TRUE ~ tolower(adm2_name)
+            )
+        ) |>
+        dplyr::select(adm2_name, adm1_name, municipality_mapped, geometry)
+
+    tbilisi_geom <- georgia_admin1 |>
+        dplyr::filter(str_detect(tolower(adm1_name), "tbilisi")) |>
+        mutate(
+            adm2_name           = "Tbilisi",
+            municipality_mapped = "tbilisi"
+        ) |>
+        dplyr::select(adm2_name, adm1_name, municipality_mapped, geometry)
+
+  ## ── Combine and dissolve to one polygon per SVI municipality ─────────────
+    muni_boundaries <- bind_rows(georgia_admin2_mapped, tbilisi_geom) |>
+        group_by(municipality_mapped) |>
+        summarise(
+            geometry = sf::st_union(geometry),
+            .groups  = "drop"
+        ) |>
+        sf::st_make_valid()
+
+  ## ── Country outline for clipping and base-layer mapping ──────────────────
+    georgia_union <- sf::st_union(muni_boundaries)
+
+  ## ── Validation ───────────────────────────────────────────────────────────
 
 ```
 
@@ -482,187 +559,201 @@ output: html_document
 ```
 
 ```{r Test & Check for Swapped Lat/Lon and "Problem" Dates}
+## ── Replace the broken swap-detection chunk ──────────────────────────
+## Start from unified_vector_data_filtered (1,859 records) and use
+## the actual Georgia boundary for swap detection.
 
-  # Convert data tibble to spatial points
-    unified_sf <- unified_vector_data_filtered |>
-        filter(!is.na(latitude) & !is.na(longitude)) |>
-        st_as_sf(
-            coords = c("longitude", "latitude"),
-            crs = 4326,
-            remove = FALSE
-        )
+  georgia_boundary <- sf::st_union(georgia_admin0)
 
-  # Convert SpatVector to sf
-    georgia_sf <- st_as_sf(Georgia_adm2)
+	## Build sf from the raw filtered data
+	uvc_sf <- unified_vector_data_filtered |>
+		dplyr::filter(!is.na(latitude) & !is.na(longitude)) |>
+		sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
 
-  # Identify points that fall outside Georgia
-    points_outside <- unified_sf |>
-        mutate(
-            within_georgia = as.logical(st_intersects(geometry, st_union(georgia_sf), sparse = FALSE))
-        ) |>
-        filter(!within_georgia)
+	inside_original <- as.logical(
+		sf::st_intersects(uvc_sf, georgia_boundary, sparse = FALSE)
+	)
 
-  # For points outside, test if swapping coordinates places them inside Georgia
-    points_to_swap <- points_outside |>
-        st_drop_geometry() |>
-        mutate(
-            # Create swapped coordinates
-              lat_swapped = longitude,
-              lon_swapped = latitude
-        ) |>
-        st_as_sf(
-            coords = c("lon_swapped", "lat_swapped"),
-            crs = 4326,
-            remove = FALSE
-        ) |>
-        mutate(
-            within_georgia_swapped = as.logical(st_intersects(geometry, st_union(georgia_sf), sparse = FALSE))
-        ) |>
-        filter(within_georgia_swapped)
+	outside_sf <- uvc_sf[!inside_original, ] |> sf::st_drop_geometry()
 
-  # Apply the swap to the original dataset
-    unified_vector_data_corrected <- unified_vector_data_filtered |>
-        mutate(
-            # Create identifier for swapping
-              needs_swap = paste(date, species, latitude, longitude) %in% 
-                           paste(points_to_swap$date, points_to_swap$species, 
-                                 points_to_swap$latitude, points_to_swap$longitude),
-            # Swap coordinates where needed
-              latitude_corrected = if_else(needs_swap, longitude, latitude),
-              longitude_corrected = if_else(needs_swap, latitude, longitude)
-        ) |>
-        dplyr::select(-latitude, -longitude, -needs_swap) |>
-        rename(
-            latitude = latitude_corrected,
-            longitude = longitude_corrected
-        )
+	cat("  Total records:", nrow(uvc_sf), "\n")
+	cat("  Inside Georgia:", sum(inside_original), "\n")
+	cat("  Outside Georgia:", nrow(outside_sf), "\n")
 
-    
-  # RRemove the suspect dates and set to spatial onlyt
-    PLACEHOLDER_SPECIES <- c("Aedes aegypti", "Aedes albopictus")
-        PRE2000_SPECIES     <- c("Culex tritaeniorhynchus", "Anopheles sacharovi")
-    
-        unified_vector_data_corrected <- unified_vector_data_corrected |>
-          dplyr::mutate(
-            date = dplyr::case_when(
-              species %in% PLACEHOLDER_SPECIES &
-                lubridate::month(date) == 1L &
-                lubridate::mday(date)  == 1L          ~ as.Date(NA),
-              species %in% PRE2000_SPECIES &
-                !is.na(date) &
-                lubridate::year(date) < 2000           ~ as.Date(NA),
-              TRUE                                     ~ date
-            )
-          )
-    
-      # Confirm removals
-        unified_vector_data_corrected |>
-          dplyr::filter(species %in% c(PLACEHOLDER_SPECIES, PRE2000_SPECIES)) |>
-          dplyr::mutate(month = lubridate::month(date),
-                        year  = lubridate::year(date)) |>
-          dplyr::count(species, year, month) |>
-          print()
-        
-    unified_vector_data_corrected <- unified_vector_data_corrected |>
-      dplyr::mutate(
-        month_name = lubridate::month(date, label = TRUE, abbr = FALSE) |>
-          as.character()
-      )  
-        
+	## Test if swapping lat/lon fixes outside records
+	swap_test_sf <- outside_sf |>
+		sf::st_as_sf(coords = c("latitude", "longitude"), crs = 4326)
+
+	swap_fixes <- as.logical(
+		sf::st_intersects(swap_test_sf, georgia_boundary, sparse = FALSE)
+	)
+
+	cat("  Fixable by swap:", sum(swap_fixes, na.rm = TRUE), "\n")
+	cat("  Unfixable:", sum(!swap_fixes, na.rm = TRUE), "\n")
+
+	## Build swap key from the fixable records
+	swap_keys <- outside_sf[swap_fixes, ] |>
+		dplyr::mutate(key = paste(species, date, latitude, longitude)) |>
+		dplyr::pull(key)
+
+	## Create corrected dataset: swap where needed, then clip
+	unified_vector_data_corrected <- unified_vector_data_filtered |>
+		dplyr::mutate(
+			key = paste(species, date, latitude, longitude),
+			needs_swap = key %in% swap_keys,
+			lat_new = dplyr::if_else(needs_swap, longitude, latitude),
+			lon_new = dplyr::if_else(needs_swap, latitude, longitude),
+			latitude = lat_new,
+			longitude = lon_new
+		) |>
+		dplyr::select(-key, -needs_swap, -lat_new, -lon_new)
+
+	cat("  Swapped", length(swap_keys), "records\n")
+
+	## Clip: remove anything still outside after swapping
+	uvc_sf_final <- unified_vector_data_corrected |>
+		dplyr::filter(!is.na(latitude) & !is.na(longitude)) |>
+		sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
+
+	inside_final <- as.logical(
+		sf::st_intersects(uvc_sf_final, georgia_boundary, sparse = FALSE)
+	)
+
+	n_removed <- sum(!inside_final)
+	unified_vector_data_corrected <- uvc_sf_final[inside_final, ] |>
+		sf::st_drop_geometry()
+
+	cat(sprintf("  Final: %d records (%d swapped, %d removed as unfixable)\n",
+	            nrow(unified_vector_data_corrected),
+	            length(swap_keys), n_removed))
+
+	## Apply the same date corrections as the original chunk
+	PLACEHOLDER_SPECIES <- c("Aedes aegypti", "Aedes albopictus")
+	PRE2000_SPECIES     <- c("Culex tritaeniorhynchus", "Anopheles sacharovi")
+
+	unified_vector_data_corrected <- unified_vector_data_corrected |>
+		dplyr::mutate(
+			date = dplyr::case_when(
+				species %in% PLACEHOLDER_SPECIES &
+					lubridate::month(date) == 1L &
+					lubridate::mday(date)  == 1L          ~ as.Date(NA),
+				species %in% PRE2000_SPECIES &
+					!is.na(date) &
+					lubridate::year(date) < 2000           ~ as.Date(NA),
+				TRUE                                       ~ date
+			),
+			month_name = lubridate::month(date, label = TRUE, abbr = FALSE) |>
+				as.character()
+		)
+
+	## Clean up
+	rm(uvc_sf, uvc_sf_final, outside_sf, swap_test_sf,
+	   inside_original, inside_final, swap_fixes, swap_keys,
+	   georgia_boundary)
+	gc()
 ```
 
 ```{r Map the Presence Points}
 
-# Define the updated target species list (deduplicated)
-  target_species <- c(
-    "Aedes aegypti", "Aedes albopictus", "Aedes geniculatus", "Aedes vexans",
-    "Culex pipiens", "Culex theileri", "Culex tritaeniorhynchus",
-    "Culiseta annulata",
-    "Anopheles sacharovi", "Anopheles maculipennis", "Anopheles plumbeus",
-    "Ixodes ricinus", "Dermacentor reticulatus", "Dermacentor marginatus",
-    "Haemaphysalis inermis", "Rhipicephalus sanguineus",
-    "Hyalomma marginatum", "Hyalomma aegyptium"
-  )
-
-# Convert Georgia shapefile to sf and build a single unioned boundary
-  georgia_sf    <- st_as_sf(Georgia_adm2)
-  georgia_union <- st_union(georgia_sf)
-
-# Filter to target species, build spatial object, clip to Georgia boundary
-  unified_vector_data_filtered <- unified_vector_data_corrected |>
-    dplyr::filter(
-      species %in% target_species,
-      !is.na(latitude),
-      !is.na(longitude)
-    ) |>
-    st_as_sf(
-      coords = c("longitude", "latitude"),
-      crs    = 4326,
-      remove = FALSE
-    ) |>
-    dplyr::filter(
-      as.logical(st_intersects(geometry, georgia_union, sparse = FALSE))
-    ) |>
-    dplyr::mutate(
-      month_name = format(date, "%B"),
-      year       = format(date, "%Y"),
-      popup_text = paste0(
-        "<b>Species:</b> ", species, "<br>",
-        "<b>Month:</b> ",   month_name, "<br>",
-        "<b>Year:</b> ",    year, "<br>",
-        "<b>Date:</b> ",    date, "<br>"
-      )
+  # Define the updated target species list (deduplicated)
+    target_species <- c(
+      "Aedes aegypti", "Aedes albopictus", 
+      #"Aedes geniculatus", 
+      "Aedes vexans",
+      "Culex pipiens", "Culex theileri", "Culex tritaeniorhynchus",
+      "Culiseta annulata",
+      "Anopheles sacharovi", "Anopheles maculipennis", "Anopheles plumbeus",
+      "Ixodes ricinus", "Dermacentor reticulatus", "Dermacentor marginatus",
+      "Haemaphysalis inermis", "Rhipicephalus sanguineus",
+      "Hyalomma marginatum", "Hyalomma aegyptium"
     )
-
-# Build the species colour palette on the filtered list
-  species_list  <- sort(unique(unified_vector_data_filtered$species))
-  color_palette <- colorFactor(
-    palette = viridis(length(species_list)),
-    domain  = species_list
-  )
-
-# Initialise the leaflet map and add species layers via purrr::reduce()
-  occurence_int_map <- leaflet() |>
-    addProviderTiles(providers$CartoDB.Positron)
-
-  occurence_int_map <- purrr::reduce(
-    species_list,
-    \(map_obj, sp) {
-      species_data <- unified_vector_data_filtered |>
-        dplyr::filter(species == sp)
-      map_obj |>
-        addCircleMarkers(
-          data        = species_data,
-          lng         = ~longitude,
-          lat         = ~latitude,
-          radius      = 5,
-          color       = ~color_palette(species),
-          fillOpacity = 0.7,
-          stroke      = TRUE,
-          weight      = 1,
-          popup       = ~popup_text,
-          group       = sp
+  
+  # Convert Georgia shapefile to sf and build a single unioned boundary
+    # georgia_sf    <- st_as_sf(Georgia_adm2)
+    # georgia_union <- st_union(georgia_sf)
+  
+  # Filter to target species, build spatial object, clip to Georgia boundary
+    unified_vector_data_filtered <- unified_vector_data_corrected |>
+      dplyr::filter(
+        species %in% target_species,
+        !is.na(latitude),
+        !is.na(longitude)
+      ) |>
+      st_as_sf(
+        coords = c("longitude", "latitude"),
+        crs    = 4326,
+        remove = FALSE
+      ) |>
+      dplyr::filter(
+        as.logical(st_intersects(geometry, georgia_union, sparse = FALSE))
+      ) |>
+      dplyr::mutate(
+        month_name = format(date, "%B"),
+        year       = format(date, "%Y"),
+        popup_text = paste0(
+          "<b>Species:</b> ", species, "<br>",
+          "<b>Month:</b> ",   month_name, "<br>",
+          "<b>Year:</b> ",    year, "<br>",
+          "<b>Date:</b> ",    date, "<br>"
         )
-    },
-    .init = occurence_int_map
-  )
+      )
+  
+  # Build the species colour palette on the filtered list
+    species_list  <- sort(unique(unified_vector_data_filtered$species))
+    color_palette <- colorFactor(
+      palette = viridis(length(species_list)),
+      domain  = species_list
+    )
+  
+  # Initialise the leaflet map and add species layers via purrr::reduce()
+    occurence_int_map <- leaflet() |>
+      addProviderTiles(providers$CartoDB.Positron)
+  
+    occurence_int_map <- purrr::reduce(
+      species_list,
+      \(map_obj, sp) {
+        species_data <- unified_vector_data_filtered |>
+          dplyr::filter(species == sp)
+        map_obj |>
+          addCircleMarkers(
+            data        = species_data,
+            lng         = ~longitude,
+            lat         = ~latitude,
+            radius      = 5,
+            color       = ~color_palette(species),
+            fillOpacity = 0.7,
+            stroke      = TRUE,
+            weight      = 1,
+            popup       = ~popup_text,
+            group       = sp
+          )
+      },
+      .init = occurence_int_map
+    )
+  
+  # Add layer controls with italicised species labels via JS DOM manipulation
+    occurence_int_map <- occurence_int_map |>
+      addLayersControl(
+        overlayGroups = species_list,
+        options       = layersControlOptions(collapsed = FALSE)
+      ) |>
+      htmlwidgets::onRender("
+        function(el, x) {
+          var labels = el.querySelectorAll('.leaflet-control-layers-overlays label span');
+          labels.forEach(function(label, i) {
+            label.innerHTML = '<i>' + label.innerHTML + '</i>';
+          });
+        }
+      ")
+  
+  occurence_int_map
 
-# Add layer controls with italicised species labels via JS DOM manipulation
-  occurence_int_map <- occurence_int_map |>
-    addLayersControl(
-      overlayGroups = species_list,
-      options       = layersControlOptions(collapsed = FALSE)
-    ) |>
-    htmlwidgets::onRender("
-      function(el, x) {
-        var labels = el.querySelectorAll('.leaflet-control-layers-overlays label span');
-        labels.forEach(function(label, i) {
-          label.innerHTML = '<i>' + label.innerHTML + '</i>';
-        });
-      }
-    ")
-
-occurence_int_map
+  # Save the interactive map as a standalone HTML file
+    htmlwidgets::saveWidget(
+      widget = occurence_int_map,
+      file   = "C:/Users/ianpsheasmith/Documents/GitHub/GeorgiaVectors/Fig1.html",
+      selfcontained = TRUE
+    )
 ```
 
 ```{r Check spatiotemporal distributions}
@@ -759,6 +850,217 @@ occurence_int_map
 
 ```
 
+```{r Spatial thinning of presence points}
+	## Preserve pre-thinning counts for comparison
+	pre_thinning_counts <- unified_vector_data_corrected |>
+		dplyr::group_by(species) |>
+		dplyr::summarise(
+			n_pre = dplyr::n(),
+			.groups = "drop"
+		)
+
+	## Assign each record to a raster cell using the baseline covariate grid.
+	## cellFromXY() maps each lon/lat pair to its enclosing cell index at the
+	## ~1 km modeling resolution, ensuring thinning operates at the same scale
+	## as covariate extraction and prediction.
+	unified_vector_data_corrected <- unified_vector_data_corrected |>
+		dplyr::mutate(
+			cell_id = terra::cellFromXY(
+				baseline_raster,
+				cbind(longitude, latitude)
+			)
+		)
+
+	## Quick diagnostic: how many records fall outside the raster extent?
+	n_outside <- sum(is.na(unified_vector_data_corrected$cell_id))
+
+	if (n_outside > 0) {
+		cat("  NOTE:", n_outside, "records fall outside the baseline raster extent.\n")
+		cat("  These will be retained but could not be assigned a cell_id.\n\n")
+	}
+
+	## Split by temporal status, thin each partition, then recombine.
+	## Records WITH a month: one per species × cell × month preserves seasonal signal
+	records_with_month <- unified_vector_data_corrected |>
+		dplyr::filter(!is.na(month_name) & !is.na(cell_id)) |>
+		dplyr::distinct(species, cell_id, month_name, .keep_all = TRUE)
+
+	## Records WITHOUT a month (NA): one per species × cell (pure spatial dedup)
+	records_baseline <- unified_vector_data_corrected |>
+		dplyr::filter(is.na(month_name) & !is.na(cell_id)) |>
+		dplyr::distinct(species, cell_id, .keep_all = TRUE)
+
+	## Records outside raster extent: retain as-is (rare edge cases)
+	records_outside <- unified_vector_data_corrected |>
+		dplyr::filter(is.na(cell_id))
+
+	## Recombine and drop the temporary cell_id column
+	unified_vector_data_corrected <- dplyr::bind_rows(
+		records_with_month,
+		records_baseline,
+		records_outside
+	) |>
+		dplyr::select(-cell_id) |>
+		dplyr::arrange(species, date)
+
+	## Clean up partition objects
+	rm(records_with_month, records_baseline, records_outside)
+
+
+## ──────────────────────────────────────────────────────────────────────────────
+## Thinning summary: before vs after counts with tier assignment preview
+## ──────────────────────────────────────────────────────────────────────────────
+
+	## Compute post-thinning counts and assign preliminary tiers
+	post_thinning_counts <- unified_vector_data_corrected |>
+		dplyr::group_by(species) |>
+		dplyr::summarise(
+			n_post = dplyr::n(),
+			.groups = "drop"
+		)
+
+	## Join pre and post, compute reduction, and assign tiers for both
+	thinning_summary <- pre_thinning_counts |>
+		dplyr::left_join(post_thinning_counts, by = "species") |>
+		dplyr::mutate(
+			n_removed   = n_pre - n_post,
+			pct_removed = round((n_removed / n_pre) * 100, 1),
+			## Tier assignments based on pre-thinning counts
+			tier_pre = dplyr::case_when(
+				n_pre < 10  ~ "Excluded",
+				n_pre <= 50 ~ "ESM",
+				n_pre <= 100 ~ "Tuned_BRT",
+				TRUE ~ "Standard_BRT"
+			),
+			## Tier assignments based on post-thinning counts
+			tier_post = dplyr::case_when(
+				n_post < 10  ~ "Excluded",
+				n_post <= 50 ~ "ESM",
+				n_post <= 100 ~ "Tuned_BRT",
+				TRUE ~ "Standard_BRT"
+			),
+			## Flag species whose tier changed
+			tier_changed = tier_pre != tier_post
+		) |>
+		dplyr::arrange(dplyr::desc(n_pre))
+	
+
+	thinning_summary |>
+		dplyr::select(species, n_pre, n_post, n_removed, pct_removed,
+		              tier_pre, tier_post, tier_changed) |>
+		print(n = Inf, width = Inf)
+
+	## Highlight any tier changes for manual review
+	tier_changes <- thinning_summary |>
+		dplyr::filter(tier_changed)
+
+	if (nrow(tier_changes) > 0) {
+		cat("\n  !! TIER CHANGES DETECTED -- review before proceeding:\n\n")
+		tier_changes |>
+			dplyr::mutate(
+				label = sprintf("    %-30s  %s (%d) -> %s (%d)",
+				                species, tier_pre, n_pre, tier_post, n_post)
+			) |>
+			dplyr::pull(label) |>
+			purrr::walk(cat, "\n")
+		cat("\n")
+	} else {
+		cat("\n  No tier changes from thinning.\n")
+	}
+
+	## Report overall reduction
+	cat(sprintf("\n  Total records:  %d -> %d  (%.1f%% reduction)\n",
+	            sum(thinning_summary$n_pre),
+	            sum(thinning_summary$n_post),
+	            (1 - sum(thinning_summary$n_post) / sum(thinning_summary$n_pre)) * 100))
+
+	## Clean up summary objects (thinning_summary retained for reference)
+	rm(pre_thinning_counts, post_thinning_counts, tier_changes)	
+```
+
+```{r Map of spatially thinned points}
+  # Filter to target species, build spatial object, clip to Georgia boundary
+    unified_vector_data_thinned_sf <- unified_vector_data_corrected |>
+      dplyr::filter(
+        species %in% target_species,
+        !is.na(latitude),
+        !is.na(longitude)
+      ) |>
+      st_as_sf(
+        coords = c("longitude", "latitude"),
+        crs    = 4326,
+        remove = FALSE
+      ) |>
+      dplyr::filter(
+        as.logical(st_intersects(geometry, georgia_union, sparse = FALSE))
+      ) |>
+      dplyr::mutate(
+        month_name = format(date, "%B"),
+        year       = format(date, "%Y"),
+        popup_text = paste0(
+          "<b>Species:</b> ", species, "<br>",
+          "<b>Month:</b> ",   month_name, "<br>",
+          "<b>Year:</b> ",    year, "<br>",
+          "<b>Date:</b> ",    date, "<br>"
+        )
+      )
+
+  # Build the species colour palette on the post-thinned species list
+    species_list_thinned  <- sort(unique(unified_vector_data_thinned_sf$species))
+    color_palette_thinned <- colorFactor(
+      palette = viridis(length(species_list_thinned)),
+      domain  = species_list_thinned
+    )
+
+  # Initialise the leaflet map and add species layers via purrr::reduce()
+    occurrence_thinned_map <- purrr::reduce(
+      species_list_thinned,
+      \(map_obj, sp) {
+        species_data <- unified_vector_data_thinned_sf |>
+          dplyr::filter(species == sp)
+        map_obj |>
+          addCircleMarkers(
+            data        = species_data,
+            lng         = ~longitude,
+            lat         = ~latitude,
+            radius      = 5,
+            color       = ~color_palette_thinned(species),
+            fillOpacity = 0.7,
+            stroke      = TRUE,
+            weight      = 1,
+            popup       = ~popup_text,
+            group       = sp
+          )
+      },
+      .init = leaflet() |>
+        addProviderTiles(providers$CartoDB.Positron)
+    )
+
+  # Add layer controls with italicised species labels via JS DOM manipulation
+    occurrence_thinned_map <- occurrence_thinned_map |>
+      addLayersControl(
+        overlayGroups = species_list_thinned,
+        options       = layersControlOptions(collapsed = FALSE)
+      ) |>
+      htmlwidgets::onRender("
+        function(el, x) {
+          var labels = el.querySelectorAll('.leaflet-control-layers-overlays label span');
+          labels.forEach(function(label, i) {
+            label.innerHTML = '<i>' + label.innerHTML + '</i>';
+          });
+        }
+      ")
+
+  occurrence_thinned_map
+
+  # Save the interactive map as a standalone HTML file
+    htmlwidgets::saveWidget(
+      widget        = occurrence_thinned_map,
+      file          = "C:/Users/ianpsheasmith/Documents/GitHub/GeorgiaVectors/Fig1.html",
+      selfcontained = TRUE
+    )
+```
+
 ```{r Define PA Generation & Cov Extraction Functions}
 
   # Projected CRS for Georgia - UTM Zone 38N, used for accurate metric buffering
@@ -768,95 +1070,106 @@ occurence_int_map
   #' Generate Pseudo-Absences for a Single Species
   #'
   #' Samples background points from the valid (non-NA) extent of a reference
-  #' raster, excluding a buffer around all known presence locations. Points are
-  #' distributed proportionally across the species' observed months so that
-  #' monthly covariate extraction is temporally matched. Records with no
-  #' date (NA month) are assigned to the baseline raster at extraction time.
+  #' raster, excluding a buffer around all known presence locations, and clipped
+  #' to the study boundary to exclude regions without presence data (e.g.,
+  #' Abkhazia, South Ossetia). Points are distributed proportionally across the
+  #' species' observed months so that monthly covariate extraction is temporally
+  #' matched. Records with no date (NA month) are assigned to the baseline
+  #' raster at extraction time.
   #'
-  #' @param species_name  Character. Species label attached to output rows.
-  #' @param species_data  Data frame. Presence records with longitude/latitude.
-  #' @param n_pas         Integer. Number of pseudo-absences to generate.
-  #' @param buffer_km     Numeric. Exclusion buffer radius around presences (km).
+  #' @param species_name    Character. Species label attached to output rows.
+  #' @param species_data    Data frame. Presence records with longitude/latitude.
+  #' @param n_pas           Integer. Number of pseudo-absences to generate.
+  #' @param buffer_km       Numeric. Exclusion buffer radius around presences (km).
   #' @param observed_months Character vector. Months observed for this species.
-  #' @param extent_mask   SpatRaster. Template raster defining valid sampling domain.
+  #' @param extent_mask     SpatRaster. Template raster defining valid sampling domain.
+  #' @param study_boundary  sf polygon. Boundary clipping the sampling domain
+  #'                        (e.g., georgia_union — excludes separatist regions).
   #' @return Tibble with columns: species, longitude, latitude, month_name, presence.
-
-    generate_species_pseudo_absences <- function(species_name,
-                                                 species_data,
-                                                 n_pas,
-                                                 buffer_km,
-                                                 observed_months,
-                                                 extent_mask) {
-
-      buffer_m <- buffer_km * 1000
-
-      # Convert valid raster cells to a sampling polygon, projected for buffering
-        valid_mask   <- !is.na(extent_mask)
-        valid_polys  <- terra::as.polygons(valid_mask) |>
-          sf::st_as_sf() |>
-          dplyr::filter(dplyr::across(1, ~ .x == 1)) |>
-          sf::st_union() |>
-          sf::st_transform(CRS_PROJECTED)
-
-      # Build exclusion zone: union of buffered presence points
-        presence_sf <- species_data |>
-          dplyr::filter(!is.na(longitude) & !is.na(latitude)) |>
-          sf::st_as_sf(coords = c("longitude", "latitude"), crs = CRS_WGS84) |>
-          sf::st_transform(CRS_PROJECTED)
-
-        exclusion_zone <- presence_sf |>
-          sf::st_buffer(dist = buffer_m) |>
-          sf::st_union()
-
-      # Subtract exclusion zone from valid sampling area
-        available_area <- sf::st_difference(valid_polys, exclusion_zone)
-
-        if (length(available_area) == 0 || sf::st_is_empty(available_area)) {
-          warning("No valid sampling area remains after buffer exclusion for: ", species_name)
-          return(tibble::tibble(
-            species    = character(),
-            longitude  = numeric(),
-            latitude   = numeric(),
-            month_name = character(),
-            presence   = integer()
-          ))
-        }
-
-      # Assign months proportionally across observed months.
-      # If no months are observed (all baseline records), all PAs get NA month.
-        if (length(observed_months) == 0) {
-          month_assignments <- rep(NA_character_, n_pas)
-        } else {
-          month_counts      <- rep(floor(n_pas / length(observed_months)), length(observed_months))
-          remainder         <- n_pas - sum(month_counts)
-          month_counts[seq_len(remainder)] <- month_counts[seq_len(remainder)] + 1L
-          month_assignments <- rep(observed_months, times = month_counts) |>
-            sample()   # shuffle so months aren't block-ordered
-        }
-
-      # Sample random points within available area; oversample then trim
-        n_sample <- ceiling(n_pas * 1.5)
-
-        sampled_pts <- sf::st_sample(available_area, size = n_sample, type = "random") |>
-          sf::st_as_sf() |>
-          dplyr::slice_head(n = n_pas) |>
-          sf::st_transform(CRS_WGS84) |>
-          dplyr::mutate(
-            longitude  = sf::st_coordinates(x)[, 1],
-            latitude   = sf::st_coordinates(x)[, 2]
-          ) |>
-          sf::st_drop_geometry()
-
-      # Attach species label, month assignments, and presence = 0
-        sampled_pts |>
-          dplyr::mutate(
-            species    = species_name,
-            month_name = month_assignments[seq_len(nrow(sampled_pts))],
-            presence   = 0L
-          ) |>
-          dplyr::select(species, longitude, latitude, month_name, presence)
+  
+  generate_species_pseudo_absences <- function(species_name,
+                                               species_data,
+                                               n_pas,
+                                               buffer_km,
+                                               observed_months,
+                                               extent_mask,
+                                               study_boundary) {
+  
+    buffer_m <- buffer_km * 1000
+  
+    ## Convert valid raster cells to a sampling polygon, projected for buffering
+    valid_mask  <- !is.na(extent_mask)
+    valid_polys <- terra::as.polygons(valid_mask) |>
+      sf::st_as_sf() |>
+      dplyr::filter(dplyr::across(1, ~ .x == 1)) |>
+      sf::st_union() |>
+      sf::st_transform(CRS_PROJECTED)
+  
+    ## Clip valid raster extent to study boundary (excludes separatist regions)
+    study_boundary_proj <- study_boundary |>
+      sf::st_transform(CRS_PROJECTED)
+  
+    valid_polys <- sf::st_intersection(valid_polys, study_boundary_proj)
+  
+    ## Build exclusion zone: union of buffered presence points
+    presence_sf <- species_data |>
+      dplyr::filter(!is.na(longitude) & !is.na(latitude)) |>
+      sf::st_as_sf(coords = c("longitude", "latitude"), crs = CRS_WGS84) |>
+      sf::st_transform(CRS_PROJECTED)
+  
+    exclusion_zone <- presence_sf |>
+      sf::st_buffer(dist = buffer_m) |>
+      sf::st_union()
+  
+    ## Subtract exclusion zone from valid (clipped) sampling area
+    available_area <- sf::st_difference(valid_polys, exclusion_zone)
+  
+    if (length(available_area) == 0 || sf::st_is_empty(available_area)) {
+      warning("No valid sampling area remains after buffer exclusion for: ", species_name)
+      return(tibble::tibble(
+        species    = character(),
+        longitude  = numeric(),
+        latitude   = numeric(),
+        month_name = character(),
+        presence   = integer()
+      ))
     }
-    
+  
+    ## Assign months proportionally across observed months.
+    ## If no months are observed (all baseline records), all PAs get NA month.
+    if (length(observed_months) == 0) {
+      month_assignments <- rep(NA_character_, n_pas)
+    } else {
+      month_counts      <- rep(floor(n_pas / length(observed_months)), length(observed_months))
+      remainder         <- n_pas - sum(month_counts)
+      month_counts[seq_len(remainder)] <- month_counts[seq_len(remainder)] + 1L
+      month_assignments <- rep(observed_months, times = month_counts) |>
+        sample()
+    }
+  
+    ## Sample random points within available area; oversample then trim
+    n_sample    <- ceiling(n_pas * 1.5)
+    sampled_pts <- sf::st_sample(available_area, size = n_sample, type = "random") |>
+      sf::st_as_sf() |>
+      dplyr::slice_head(n = n_pas) |>
+      sf::st_transform(CRS_WGS84) |>
+      dplyr::mutate(
+        longitude = sf::st_coordinates(x)[, 1],
+        latitude  = sf::st_coordinates(x)[, 2]
+      ) |>
+      sf::st_drop_geometry()
+  
+    ## Attach species label, month assignments, and presence = 0
+    sampled_pts |>
+      dplyr::mutate(
+        species    = species_name,
+        month_name = month_assignments[seq_len(nrow(sampled_pts))],
+        presence   = 0L
+      ) |>
+      dplyr::select(species, longitude, latitude, month_name, presence)
+  }
+
+
   # Categorical layers requiring majority extraction rather than mean
     CATEGORICAL_LAYERS <- "WorldCover"
 
@@ -993,29 +1306,25 @@ occurence_int_map
   # Generate the pseudo-absences 
     pseudo_absences_list <- purrr::pmap_dfr(
       list(
-        species_name = species_params_list$species,
-        n_pas = species_params_list$n_pseudo_absences,
-        buffer_km = species_params_list$pa_buffer_km,
+        species_name    = species_params_list$species,
+        n_pas           = species_params_list$n_pseudo_absences,
+        buffer_km       = species_params_list$pa_buffer_km,
         observed_months = species_params_list$observed_months_vec
       ),
       function(species_name, n_pas, buffer_km, observed_months) {
-        
-        cat("  Processing:", species_name, "\n")
-        
-        # Filter data for this species
+    
         species_data <- unified_vector_data_corrected |>
           dplyr::filter(species == species_name)
-        
-        # Generate PAs
+    
         pas <- generate_species_pseudo_absences(
-          species_name = species_name,
-          species_data = species_data,
-          n_pas = n_pas,
-          buffer_km = buffer_km,
+          species_name    = species_name,
+          species_data    = species_data,
+          n_pas           = n_pas,
+          buffer_km       = buffer_km,
           observed_months = observed_months,
-          extent_mask = georgia_mask
+          extent_mask     = georgia_mask,
+          study_boundary  = georgia_union
         )
-        
         return(pas)
       }
     )
@@ -1168,7 +1477,8 @@ occurence_int_map
                   n_pas = n_pas,
                   buffer_km = buffer_km,
                   observed_months = observed_months,
-                  extent_mask = georgia_mask
+                  extent_mask = georgia_mask,
+                  study_boundary  = georgia_union
                 )
               
               return(pas)
@@ -1239,10 +1549,380 @@ occurence_int_map
 
 ```
 
+```{r Collinearity Assessment — Taxon-Level VIF}
+
+## ──────────────────────────────────────────────────────────────────────────────
+## Variance Inflation Factor (VIF) assessment at the taxon level.
+##
+## Computes pairwise Pearson correlations and stepwise VIF for the full
+## candidate predictor set for each taxon group (mosquitoes and ticks),
+## removing the highest-VIF variable iteratively until all VIF < 10.
+## WorldCover (categorical) is excluded from VIF computation but retained
+## in the final predictor sets regardless.
+##
+## Uses extracted covariate values at all presence + pseudo-absence locations
+## from `combined_pa_presence_with_covariates` to characterise the
+## correlation structure across the full modeled environmental space.
+##
+## Output objects:
+##   MOSQUITO_VARS_FINAL — reduced continuous predictors + WorldCover
+##   TICK_VARS_FINAL     — reduced continuous predictors + WorldCover
+##   vif_results_summary — full diagnostic tibble for methods reporting
+## ──────────────────────────────────────────────────────────────────────────────
+
+## ── Species-to-taxon classification ──────────────────────────────────────────
+
+	ALL_MOSQUITO_SPECIES <- c(
+		"Aedes aegypti", "Aedes albopictus", 
+		#"Aedes caspius",
+		#"Aedes geniculatus", 
+		"Aedes vexans",
+		"Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
+		"Culex pipiens", "Culex theileri", "Culex tritaeniorhynchus",
+		"Culiseta annulata"#, "Culiseta longiareolata"
+	)
+
+	ALL_TICK_SPECIES <- c(
+		"Dermacentor marginatus", "Dermacentor reticulatus",
+		"Haemaphysalis inermis",
+		"Hyalomma aegyptium", "Hyalomma marginatum",
+		"Ixodes ricinus",
+		"Rhipicephalus sanguineus"
+	)
+
+## ── Candidate predictor sets (continuous only; WorldCover handled separately)
+
+	MOSQUITO_CONTINUOUS <- c(
+		"hurs", "pr", "sfcWind", "tas", "tasmax", "tasmin",
+		"NDVI", "Elevation", "Slope"
+	)
+
+	TICK_CONTINUOUS <- c(
+		"hurs", "pr", "tas", "tasmax", "tasmin",
+		"NDVI", "Elevation", "Slope",
+		"BulkDensity", "CoarseFragments", "Nitrogen",
+		"SoilpH", "SandContent", "SiltContent", "SoilOrganicCarbon"
+	)
+
+	CATEGORICAL_VAR <- "WorldCover"
+
+
+## ── VIF helper functions ─────────────────────────────────────────────────────
+
+	#' Compute VIF for all columns in a data frame of continuous predictors.
+	#' VIF_j = 1 / (1 - R²_j), where R²_j is from regressing variable j
+	#' on all remaining variables.
+	compute_vif <- function(data) {
+		vars <- names(data)
+		purrr::map_dfr(vars, function(v) {
+			fml <- as.formula(paste(v, "~ ."))
+			r2  <- summary(stats::lm(fml, data = data))$r.squared
+			tibble::tibble(variable = v, vif = 1 / (1 - r2), r_squared = r2)
+		}) |>
+			dplyr::arrange(dplyr::desc(vif))
+	}
+
+	#' Stepwise VIF removal: iteratively drop the highest-VIF variable
+	#' until all remaining variables have VIF below the threshold.
+	#' Returns the retained set, removal order, and final VIF table.
+	stepwise_vif <- function(data, threshold = 10, verbose = TRUE) {
+
+		current_data <- data
+		removal_log  <- tibble::tibble(
+			step     = integer(),
+			removed  = character(),
+			vif_at_removal = numeric()
+		)
+
+		step <- 0L
+
+		repeat {
+			vif_table <- compute_vif(current_data)
+			max_vif   <- max(vif_table$vif)
+
+			if (max_vif < threshold) break
+
+			step <- step + 1L
+			worst_var <- vif_table$variable[which.max(vif_table$vif)]
+			worst_vif <- max_vif
+
+			removal_log <- dplyr::bind_rows(
+				removal_log,
+				tibble::tibble(
+					step = step, removed = worst_var, vif_at_removal = worst_vif
+				)
+			)
+
+			if (verbose) {
+				cat(sprintf("    Step %d: removed %-20s (VIF = %.1f)\n",
+				            step, worst_var, worst_vif))
+			}
+
+			current_data <- current_data |>
+				dplyr::select(-dplyr::all_of(worst_var))
+		}
+
+		list(
+			retained    = names(current_data),
+			removed     = removal_log,
+			final_vif   = compute_vif(current_data),
+			n_removed   = nrow(removal_log)
+		)
+	}
+
+
+## ── Extract covariate matrices by taxon ──────────────────────────────────────
+
+	## Mosquito records (presence + PA) — continuous predictors only
+	mosquito_cov_matrix <- combined_pa_presence_with_covariates |>
+		dplyr::filter(species %in% ALL_MOSQUITO_SPECIES) |>
+		dplyr::select(dplyr::all_of(MOSQUITO_CONTINUOUS)) |>
+		tidyr::drop_na()
+
+	## Tick records (presence + PA) — continuous predictors only
+	tick_cov_matrix <- combined_pa_presence_with_covariates |>
+		dplyr::filter(species %in% ALL_TICK_SPECIES) |>
+		dplyr::select(dplyr::all_of(TICK_CONTINUOUS)) |>
+		tidyr::drop_na()
+
+	cat("  Mosquito covariate matrix:", nrow(mosquito_cov_matrix), "records x",
+	    ncol(mosquito_cov_matrix), "continuous predictors\n")
+	cat("  Tick covariate matrix:    ", nrow(tick_cov_matrix), "records x",
+	    ncol(tick_cov_matrix), "continuous predictors\n\n")
+
+
+## ── Pairwise Pearson correlations ────────────────────────────────────────────
+
+	cat("===================================================================\n")
+	cat("  PAIRWISE PEARSON CORRELATIONS\n")
+	cat("===================================================================\n\n")
+
+	## Mosquito correlations — flag pairs with |r| > 0.7
+	mosquito_cor <- cor(mosquito_cov_matrix, use = "complete.obs")
+
+	mosquito_high_cor <- mosquito_cor |>
+		as.data.frame() |>
+		tibble::rownames_to_column("var1") |>
+		tidyr::pivot_longer(-var1, names_to = "var2", values_to = "r") |>
+		dplyr::filter(var1 < var2, abs(r) > 0.7) |>
+		dplyr::arrange(dplyr::desc(abs(r)))
+
+	cat("  MOSQUITOES — pairs with |r| > 0.7:\n")
+	if (nrow(mosquito_high_cor) == 0) {
+		cat("    None\n\n")
+	} else {
+		purrr::pwalk(mosquito_high_cor, function(var1, var2, r) {
+			cat(sprintf("    %-15s × %-15s  r = %+.3f\n", var1, var2, r))
+		})
+		cat("\n")
+	}
+
+	## Tick correlations — flag pairs with |r| > 0.7
+	tick_cor <- cor(tick_cov_matrix, use = "complete.obs")
+
+	tick_high_cor <- tick_cor |>
+		as.data.frame() |>
+		tibble::rownames_to_column("var1") |>
+		tidyr::pivot_longer(-var1, names_to = "var2", values_to = "r") |>
+		dplyr::filter(var1 < var2, abs(r) > 0.7) |>
+		dplyr::arrange(dplyr::desc(abs(r)))
+
+	cat("  TICKS — pairs with |r| > 0.7:\n")
+	if (nrow(tick_high_cor) == 0) {
+		cat("    None\n\n")
+	} else {
+		purrr::pwalk(tick_high_cor, function(var1, var2, r) {
+			cat(sprintf("    %-15s × %-15s  r = %+.3f\n", var1, var2, r))
+		})
+		cat("\n")
+	}
+
+
+## ── Stepwise VIF (threshold = 10) ───────────────────────────────────────────
+
+	cat("\n===================================================================\n")
+	cat("  STEPWISE VIF REMOVAL (threshold = 10)\n")
+	cat("===================================================================\n\n")
+
+	## -- Mosquitoes --
+	cat("  MOSQUITOES:\n")
+	cat("  Initial predictors:", paste(MOSQUITO_CONTINUOUS, collapse = ", "), "\n\n")
+
+	mosquito_vif_result <- stepwise_vif(mosquito_cov_matrix, threshold = 10)
+
+	if (mosquito_vif_result$n_removed == 0) {
+		cat("    No variables exceeded VIF = 10; all retained.\n")
+	}
+
+	cat("\n  Final mosquito VIF values:\n")
+	purrr::pwalk(mosquito_vif_result$final_vif, function(variable, vif, r_squared) {
+		cat(sprintf("    %-20s  VIF = %6.2f  (R² = %.3f)\n",
+		            variable, vif, r_squared))
+	})
+
+	## -- Ticks --
+	cat("\n\n  TICKS:\n")
+	cat("  Initial predictors:", paste(TICK_CONTINUOUS, collapse = ", "), "\n\n")
+
+	tick_vif_result <- stepwise_vif(tick_cov_matrix, threshold = 10)
+
+	if (tick_vif_result$n_removed == 0) {
+		cat("    No variables exceeded VIF = 10; all retained.\n")
+	}
+
+	cat("\n  Final tick VIF values:\n")
+	purrr::pwalk(tick_vif_result$final_vif, function(variable, vif, r_squared) {
+		cat(sprintf("    %-20s  VIF = %6.2f  (R² = %.3f)\n",
+		            variable, vif, r_squared))
+	})
+
+
+## ── Define final predictor sets (append WorldCover back in) ──────────────────
+
+	MOSQUITO_VARS_FINAL <- c(mosquito_vif_result$retained, CATEGORICAL_VAR)
+	TICK_VARS_FINAL     <- c(tick_vif_result$retained, CATEGORICAL_VAR)
+
+	cat("\n\n===================================================================\n")
+	cat("  FINAL PREDICTOR SETS\n")
+	cat("===================================================================\n\n")
+
+	cat("  Mosquitoes (", length(MOSQUITO_VARS_FINAL), "vars ):\n")
+	cat("   ", paste(MOSQUITO_VARS_FINAL, collapse = ", "), "\n\n")
+
+	cat("  Ticks (", length(TICK_VARS_FINAL), "vars ):\n")
+	cat("   ", paste(TICK_VARS_FINAL, collapse = ", "), "\n\n")
+
+	## Report what was removed from each taxon
+	if (mosquito_vif_result$n_removed > 0) {
+		cat("  Removed from mosquitoes:",
+		    paste(mosquito_vif_result$removed$removed, collapse = ", "), "\n")
+	}
+	if (tick_vif_result$n_removed > 0) {
+		cat("  Removed from ticks:     ",
+		    paste(tick_vif_result$removed$removed, collapse = ", "), "\n")
+	}
+
+
+## ── Species-level VIF verification ───────────────────────────────────────────
+## Confirm that no individual species has residual VIF > 10 under the
+## taxon-level reduced predictor set. This catches edge cases where a
+## species' spatial distribution produces unusual local correlations.
+
+	cat("\n\n===================================================================\n")
+	cat("  SPECIES-LEVEL VIF VERIFICATION (reduced predictor sets)\n")
+	cat("===================================================================\n\n")
+
+	## Get species actually in the modeling pipeline
+	modeled_species <- unique(combined_pa_presence_with_covariates$species)
+
+	species_vif_check <- purrr::map_dfr(modeled_species, function(sp) {
+
+		## Determine taxon and select appropriate reduced predictor set
+		if (sp %in% ALL_MOSQUITO_SPECIES) {
+			cont_vars <- setdiff(MOSQUITO_VARS_FINAL, CATEGORICAL_VAR)
+			taxon <- "mosquito"
+		} else if (sp %in% ALL_TICK_SPECIES) {
+			cont_vars <- setdiff(TICK_VARS_FINAL, CATEGORICAL_VAR)
+			taxon <- "tick"
+		} else {
+			return(tibble::tibble())
+		}
+
+		## Extract this species' covariate values (presence + PA)
+		sp_cov <- combined_pa_presence_with_covariates |>
+			dplyr::filter(species == sp) |>
+			dplyr::select(dplyr::all_of(cont_vars)) |>
+			tidyr::drop_na()
+
+		## Need at least n > p for VIF to be computable
+		if (nrow(sp_cov) <= length(cont_vars)) {
+			return(tibble::tibble(
+				species = sp, taxon = taxon,
+				max_vif = NA_real_, flagged = NA
+			))
+		}
+
+		sp_vif <- compute_vif(sp_cov)
+
+		tibble::tibble(
+			species  = sp,
+			taxon    = taxon,
+			max_vif  = max(sp_vif$vif),
+			flagged  = max(sp_vif$vif) >= 10
+		)
+	})
+
+	species_vif_check |>
+		dplyr::arrange(taxon, dplyr::desc(max_vif)) |>
+		dplyr::mutate(
+			label = sprintf("  %-30s  %-10s  max VIF = %6.2f  %s",
+			                species, taxon, max_vif,
+			                dplyr::if_else(flagged, "!! FLAG", ""))
+		) |>
+		dplyr::pull(label) |>
+		purrr::walk(cat, "\n")
+
+## ── Compile summary for methods reporting ────────────────────────────────────
+
+	vif_results_summary <- list(
+		mosquito = list(
+			initial_vars   = MOSQUITO_CONTINUOUS,
+			final_vars     = MOSQUITO_VARS_FINAL,
+			removed        = mosquito_vif_result$removed,
+			final_vif      = mosquito_vif_result$final_vif,
+			cor_matrix     = mosquito_cor,
+			high_cor_pairs = mosquito_high_cor
+		),
+		tick = list(
+			initial_vars   = TICK_CONTINUOUS,
+			final_vars     = TICK_VARS_FINAL,
+			removed        = tick_vif_result$removed,
+			final_vif      = tick_vif_result$final_vif,
+			cor_matrix     = tick_cor,
+			high_cor_pairs = tick_high_cor
+		),
+		species_verification = species_vif_check,
+		threshold_used       = 10
+	)
+
+	## Persist for use in downstream modeling chunks and methods reporting
+	VIF_SAVE_DIR <- file.path(
+		"C:/Users/ianpsheasmith/OneDrive - University of Florida",
+		"General - Georgia Ticks/Georgia_Ticks/Paper2_Data/Summaries"
+	)
+	dir.create(VIF_SAVE_DIR, showWarnings = FALSE, recursive = TRUE)
+
+	saveRDS(
+		vif_results_summary,
+		file = file.path(VIF_SAVE_DIR, "vif_collinearity_assessment.rds")
+	)
+
+	cat("\n  Saved:", file.path(VIF_SAVE_DIR, "vif_collinearity_assessment.rds"), "\n")
+
+
+## ── Clean up intermediates ───────────────────────────────────────────────────
+
+	rm(mosquito_cov_matrix, tick_cov_matrix,
+	   mosquito_cor, tick_cor,
+	   mosquito_high_cor, tick_high_cor,
+	   mosquito_vif_result, tick_vif_result,
+	   species_vif_check, modeled_species,
+	   compute_vif, stepwise_vif, VIF_SAVE_DIR)
+	gc()
+
+```
+
 ```{r ESMs Full Pipeline}
 
   # ESM Pipeline: All ESM-eligible species
     # MAXNET with LQH features, betamultiplier = 2.5 (Breiner et al. 2018)
+
+
+  ## Clean stale biomod2 working directories
+    old_dirs <- list.dirs(".", recursive = FALSE) |>
+    	grep("ESM\\.BIOMOD\\.output|BIOMOD_output|test_An", x = _, value = TRUE)
+    purrr::walk(old_dirs, ~ unlink(.x, recursive = TRUE))
+    cat("Cleaned", length(old_dirs), "stale directories\n")
 
     set.seed(1999)
 
@@ -1254,24 +1934,18 @@ occurence_int_map
 
   # ESM species and their covariate sets
     ESM_SPECIES <- c(
-    	"Aedes aegypti", "Aedes geniculatus",
+    	"Aedes aegypti", 
+    	#"Aedes caspius",
     	"Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
-    	"Culex tritaeniorhynchus", "Culiseta annulata", "Culiseta longiareolata",
+    	"Culex theileri", "Culex tritaeniorhynchus", 
+    	"Culiseta annulata", 
+    	#"Culiseta longiareolata",
     	"Hyalomma aegyptium", "Rhipicephalus sanguineus"
     )
 
-    MOSQUITO_COVARIATES <- c(
-    	"hurs", "pr", "sfcWind", "tas", "tasmax", "tasmin",
-    	"NDVI", "Elevation", "Slope", "WorldCover"
-    )
-
-    TICK_COVARIATES <- c(
-    	"hurs", "pr", "tas", "tasmax", "tasmin",
-    	"NDVI", "Elevation", "Slope",
-    	"BulkDensity", "CoarseFragments", "Nitrogen",
-    	"SoilpH", "SandContent", "SiltContent", "SoilOrganicCarbon",
-    	"WorldCover"
-    )
+    MOSQUITO_COVARIATES <- MOSQUITO_VARS_FINAL
+    
+    TICK_COVARIATES     <- TICK_VARS_FINAL
     
     TICK_SPECIES <- c(
     	"Hyalomma aegyptium", "Rhipicephalus sanguineus"
@@ -1561,34 +2235,24 @@ occurence_int_map
   	)
 
 	## The four "Tuned BRT" species (50–100 occurrences)
-  	TUNED_SPECIES <- c(
-  		"Aedes vexans",
-  		"Culex theileri",
-  		"Haemaphysalis inermis",
-  		"Hyalomma marginatum"
-  	)
+    TUNED_SPECIES <- c(
+    	"Aedes albopictus", 
+    	"Dermacentor reticulatus", 
+    	"Haemaphysalis inermis",
+    	"Hyalomma marginatum"
+    )
 
 	## Species-to-taxon mapping (determines covariate set)
-  	MOSQUITO_SPECIES <- c("Aedes vexans", "Culex theileri")
-  	TICK_SPECIES     <- c("Haemaphysalis inermis", "Hyalomma marginatum")
+  	MOSQUITO_SPECIES <- c("Aedes albopictus")
+  	TICK_SPECIES     <- c("Dermacentor reticulatus",
+                      "Haemaphysalis inermis", "Hyalomma marginatum")
 
 	## Categorical covariate
 	  CATEGORICAL_VAR <- "WorldCover"
 
-	## Mosquito covariates: climate + terrain + NDVI + wind (no soil)
-  	MOSQUITO_VARS <- c(
-  		"hurs", "pr", "sfcWind", "tas", "tasmax", "tasmin",
-  		"NDVI", "Elevation", "Slope", CATEGORICAL_VAR
-  	)
-
-	## Tick covariates: climate + terrain + NDVI + soil (no wind)
-  	TICK_VARS <- c(
-  		"hurs", "pr", "tas", "tasmax", "tasmin",
-  		"NDVI", "Elevation", "Slope",
-  		"BulkDensity", "CoarseFragments", "Nitrogen",
-  		"SoilpH", "SandContent", "SiltContent", "SoilOrganicCarbon",
-  		CATEGORICAL_VAR
-  	)
+  ## Variables
+  	MOSQUITO_VARS <- MOSQUITO_VARS_FINAL
+  	TICK_VARS     <- TICK_VARS_FINAL
 
 
 	#' Retrieve appropriate covariate names for a given species
@@ -2106,37 +2770,23 @@ occurence_int_map
     		max.trees       = 50000
     	)
   
-  	## The six "Standard BRT" species (>100 occurrences)
-    	STANDARD_SPECIES <- c(
-    		"Culex pipiens",
-    		"Ixodes ricinus",
-    		"Aedes albopictus",
-    		"Dermacentor marginatus",
-    		"Dermacentor reticulatus",
-    		"Aedes caspius"
-    	)
+  	## The "Standard BRT" species (>100 occurrences)
+      STANDARD_SPECIES <- c(
+      	"Culex pipiens",
+      	"Ixodes ricinus",
+      	"Dermacentor marginatus"
+      )
   
   	## Species-to-taxon mapping (determines covariate set)
-  	  MOSQUITO_SPECIES <- c("Culex pipiens", "Aedes albopictus", "Aedes caspius")
-  	  TICK_SPECIES     <- c("Ixodes ricinus", "Dermacentor marginatus", "Dermacentor reticulatus")
+      MOSQUITO_SPECIES <- c("Culex pipiens")
+      TICK_SPECIES     <- c("Ixodes ricinus", "Dermacentor marginatus")
   
-  	## Categorical covariate
-  	  CATEGORICAL_VAR <- "WorldCover"
-  
-  	## Mosquito covariates: climate + terrain + NDVI + wind (no soil)
-    	MOSQUITO_VARS <- c(
-    		"hurs", "pr", "sfcWind", "tas", "tasmax", "tasmin",
-    		"NDVI", "Elevation", "Slope", CATEGORICAL_VAR
-    	)
-  
-  	## Tick covariates: climate + terrain + NDVI + soil (no wind)
-    	TICK_VARS <- c(
-    		"hurs", "pr", "tas", "tasmax", "tasmin",
-    		"NDVI", "Elevation", "Slope",
-    		"BulkDensity", "CoarseFragments", "Nitrogen",
-    		"SoilpH", "SandContent", "SiltContent", "SoilOrganicCarbon",
-    		CATEGORICAL_VAR
-    	)
+   ## Categorical covariate
+     CATEGORICAL_VAR <- "WorldCover"
+     
+   ## Variables (Using the VIF-assessed final lists)
+     MOSQUITO_VARS <- MOSQUITO_VARS_FINAL
+     TICK_VARS     <- TICK_VARS_FINAL
   
   
   # ─────────────────────────────────────────────────────────────────────────────
@@ -2649,47 +3299,324 @@ occurence_int_map
   	dir.create(file.path(PREDICTION_DIR, "Monthly"),  showWarnings = FALSE, recursive = TRUE)
 
 	## Saved model locations
-  	TUNED_BRT_MODEL_DIR <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_BRTs_New/Tuned_BRT_Results/models"
-  	ESM_MODEL_DIR       <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_ESMs"
+	TUNED_BRT_MODEL_DIR    <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_BRTs_New/Tuned_BRT_Results/models"
+	STANDARD_BRT_MODEL_DIR <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_BRTs_New/Standard_BRT_Results/models"
+	ESM_MODEL_DIR          <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_ESMs"
+	
+	## Load rasters and covariate lists
+  MOSQUITO_VARS_FINAL <- readRDS(file.path(PREDICTION_DIR, "env_mosquito_vars.rds"))
+  TICK_VARS_FINAL     <- readRDS(file.path(PREDICTION_DIR, "env_tick_vars.rds"))	
+  
+  ## Load monthly rasters directly from source .tif files (file-backed, pointer-safe)
+covariate_dir   <- "C:/Users/ianpsheasmith/Documents/GitHub/GVecVuln/data/Covariates/Monthly_Stacks"
 
-	## Species lists
-  	TUNED_BRT_SPECIES <- c(
-  		"Aedes vexans",
-  		"Culex theileri",
-  		"Haemaphysalis inermis",
-  		"Hyalomma marginatum"
-  	)
+monthly_raster_paths <- list.files(
+    covariate_dir,
+    pattern    = "\\.tif$",
+    full.names = TRUE
+  ) |>
+  tibble::tibble(full_path = _) |>
+  dplyr::mutate(
+    file_name = basename(full_path),
+    file_size = file.size(full_path)
+  ) |>
+  dplyr::filter(
+    file_size  > 0,
+    !stringr::str_detect(file_name, "Combined|Baseline|Static")
+  ) |>
+  dplyr::arrange(file_name) |>
+  dplyr::pull(full_path) |>
+  rlang::set_names(
+    ~ stringr::str_remove(basename(.), "\\.tif$")
+  )
 
-  	ESM_SPECIES <- c(
-  		"Aedes aegypti", "Aedes geniculatus",
-  		"Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
-  		"Culex tritaeniorhynchus", "Culiseta annulata", "Culiseta longiareolata",
-  		"Hyalomma aegyptium", "Rhipicephalus sanguineus"
-  	)
+## Also reload baseline directly from disk
+baseline_raster <- list.files(
+    covariate_dir,
+    pattern    = "Baseline.*\\.tif$",
+    full.names = TRUE
+  ) |>
+  terra::rast()
 
-	## Taxon-to-covariate mapping
-  	TUNED_BRT_MOSQUITO <- c("Aedes vexans", "Culex theileri")
-  	TUNED_BRT_TICK     <- c("Haemaphysalis inermis", "Hyalomma marginatum")
-  	ESM_TICK           <- c("Hyalomma aegyptium", "Rhipicephalus sanguineus")
+## ═══════════════════════════════════════════════════════════════════════
+## SOIL RASTER NA INFILL — Crop/Mask + Focal-Mean Interpolation
+## ═══════════════════════════════════════════════════════════════════════
+## Soil layers (SoilGrids-derived) carry NA over water bodies and other
+## non-soil surfaces within Georgia, producing missing pixels in tick
+## predictions.  Climate and topographic layers are complete within the
+## national boundary.  This block:
+##   (1) Crops and masks all prediction rasters to the Georgian boundary
+##   (2) Diagnoses the per-layer NA footprint in the tick covariate set
+##   (3) Identifies layers with excess NA relative to the structural mask
+##   (4) Applies iterative focal-mean infill ONLY to those layers
+##   (5) Validates that no excess NAs remain
+##
+## Placement: after baseline_raster / monthly_raster_paths are loaded,
+##            before any prediction code.  Extraction is unaffected
+##            because this operates on the prediction rasters, not on
+##            point-extracted training data.
+## ═══════════════════════════════════════════════════════════════════════
 
-	## Covariate sets (must match layer names in raster stacks)
-  	MOSQUITO_COVARIATES <- c(
-  		"hurs", "pr", "sfcWind", "tas", "tasmax", "tasmin",
-  		"NDVI", "Elevation", "Slope", "WorldCover"
-  	)
+## ── Load Georgian boundary as a terra vector ─────────────────────────
 
-  	TICK_COVARIATES <- c(
-  		"hurs", "pr", "tas", "tasmax", "tasmin",
-  		"NDVI", "Elevation", "Slope",
-  		"BulkDensity", "CoarseFragments", "Nitrogen",
-  		"SoilpH", "SandContent", "SiltContent", "SoilOrganicCarbon",
-  		"WorldCover"
-  	)
+	temp_dir    <- tempdir()
+	geojson_zip <- "C:/Users/ianpsheasmith/Documents/GitHub/GVecVuln/data/geo_admin_boundaries.geojson.zip"
+	unzip(geojson_zip, exdir = temp_dir, overwrite = TRUE)
+
+	georgia_admin0   <- sf::st_read(file.path(temp_dir, "geo_admin0.geojson"), quiet = TRUE)
+	georgia_boundary <- sf::st_union(georgia_admin0) |>
+		terra::vect()
+
+
+## ── (1) Crop and mask baseline raster to Georgia ─────────────────────
+
+	cat("── Cropping and masking baseline raster to Georgia ──────────────\n")
+	cat("  Raw raster cells:", terra::ncell(baseline_raster), "\n")
+
+	baseline_raster <- terra::crop(baseline_raster, georgia_boundary) |>
+		terra::mask(georgia_boundary)
+
+	cat("  After crop+mask: ", terra::ncell(baseline_raster), "\n\n")
+
+
+## ── (2) Diagnostic: count NAs per tick layer after masking ───────────
+
+	TICK_VARS_FINAL <- readRDS(file.path(PREDICTION_DIR, "env_tick_vars.rds"))
+
+	baseline_na_report <- TICK_VARS_FINAL |>
+		purrr::map_dfr(function(var_name) {
+			r <- baseline_raster[[var_name]]
+			tibble::tibble(
+				variable = var_name,
+				n_cells  = terra::ncell(r),
+				n_na     = terra::global(r, fun = function(x) sum(is.na(x))) |>
+					as.numeric()
+			)
+		}) |>
+		dplyr::mutate(
+			pct_na = round(100 * n_na / n_cells, 3)
+		) |>
+		dplyr::arrange(dplyr::desc(n_na))
+
+	cat("── Post-Mask NA Diagnostic (Tick Covariates) ───────────────────\n")
+	print(baseline_na_report, n = nrow(baseline_na_report))
+
+## ── (3) Identify layers with excess NA ───────────────────────────────
+##    Structural NA = cells inside the bounding box but outside the
+##    polygon (mask-induced).  Excess = layer-specific gaps within
+##    Georgia (water bodies, etc. in the soil data).
+
+	structural_na <- min(baseline_na_report$n_na)
+
+	layers_to_fill <- baseline_na_report |>
+		dplyr::filter(n_na > structural_na) |>
+		dplyr::pull(variable)
+
+	cat("\n  Structural NA (mask-induced, shared by all layers):", structural_na, "cells\n")
+	cat("  Layers requiring focal infill:", length(layers_to_fill), "\n")
+
+	if (length(layers_to_fill) > 0) {
+		cat("   ", paste(layers_to_fill, collapse = ", "), "\n")
+		cat("  Excess NA per layer:",
+		    baseline_na_report |>
+		    	dplyr::filter(variable %in% layers_to_fill) |>
+		    	dplyr::mutate(excess = n_na - structural_na) |>
+		    	dplyr::pull(excess) |>
+		    	unique() |>
+		    	paste(collapse = ", "),
+		    "cells\n\n")
+	}
+
+
+## ── (4) Focal-mean infill function ───────────────────────────────────
+##    3x3 moving window applied iteratively until all within-Georgia NAs
+##    that have at least one valid neighbour are filled.  Structural
+##    (mask-edge) NAs remain untouched because they have no valid
+##    neighbours within the mask.
+
+  focal_fill_na <- function(raster_stack, layer_names, max_iter = 50) {
+  
+  		purrr::walk(layer_names, function(lyr) {
+  
+  			r        <- raster_stack[[lyr]]
+  			na_start <- terra::global(r, fun = function(x) sum(is.na(x))) |>
+  				as.numeric()
+  
+  			if (na_start <= structural_na) {
+  				cat("    ", lyr, ": no excess NAs, skipping\n")
+  				return(invisible())
+  			}
+  
+  			iter    <- 0
+  			na_prev <- na_start
+  
+  			while (iter < max_iter) {
+  				iter <- iter + 1
+  
+  				r_filled <- terra::focal(
+  					r,
+  					w         = 3,
+  					fun       = "mean",
+  					na.policy = "only",
+  					na.rm     = TRUE
+  				)
+  
+  				r_filled <- terra::mask(r_filled, georgia_boundary)
+  
+  				na_now <- terra::global(r_filled, fun = function(x) sum(is.na(x))) |>
+  					as.numeric()
+  
+  				if (na_now == na_prev) break
+  
+  				r       <- r_filled
+  				na_prev <- na_now
+  			}
+  
+  			## Update the stack in the function's environment
+  			raster_stack[[lyr]] <<- r_filled
+  
+  			cat("    ", lyr, ": ", na_start, " -> ", na_prev,
+  			    " NA  (", iter, " iters, ",
+  			    na_start - na_prev, " cells filled)\n", sep = "")
+  		})
+  
+  		## Return the modified stack so the caller can capture it
+  		return(raster_stack)
+  	}
+
+## ── (4a) Apply to baseline raster ────────────────────────────────────
+
+	if (length(layers_to_fill) > 0) {
+		cat("── Filling baseline raster ──────────────────────────────────────\n")
+		baseline_raster <- focal_fill_na(baseline_raster, layers_to_fill)
+	}
+
+
+## ── (4b) Apply to each monthly raster ────────────────────────────────
+
+	FILLED_MONTHLY_DIR <- file.path(PREDICTION_DIR, "Monthly_Filled")
+	dir.create(FILLED_MONTHLY_DIR, showWarnings = FALSE, recursive = TRUE)
+
+	cat("\n── Cropping, masking, and filling monthly rasters ───────────────\n")
+
+	monthly_raster_paths <- purrr::imap_chr(monthly_raster_paths, function(path, nm) {
+
+		cat("  ", nm, "\n")
+		month_rast <- terra::rast(path) |>
+			terra::crop(georgia_boundary) |>
+			terra::mask(georgia_boundary)
+
+		## Only fill layers present in both the monthly stack and the fill list
+		month_fill_layers <- intersect(layers_to_fill, names(month_rast))
+
+		if (length(month_fill_layers) > 0) {
+			month_rast <- focal_fill_na(month_rast, month_fill_layers)
+		}
+
+		## Write filled stack to the staging directory
+		out_path <- file.path(FILLED_MONTHLY_DIR, basename(path))
+		terra::writeRaster(month_rast, out_path, overwrite = TRUE)
+
+		return(out_path)
+	})
+
+
+## ── (5) Validation: confirm uniform NA footprint ─────────────────────
+
+	post_fill_report <- TICK_VARS_FINAL |>
+		purrr::map_dfr(function(var_name) {
+			r <- baseline_raster[[var_name]]
+			tibble::tibble(
+				variable = var_name,
+				n_na     = terra::global(r, fun = function(x) sum(is.na(x))) |>
+					as.numeric()
+			)
+		})
+
+	excess_remaining <- post_fill_report |>
+		dplyr::filter(n_na > structural_na)
+
+	if (nrow(excess_remaining) == 0) {
+		cat("\n  All tick covariate layers now share a uniform NA footprint (",
+		    structural_na, " structural mask cells).\n", sep = "")
+	} else {
+		warning(
+			"Excess NAs persist in: ",
+			paste(excess_remaining$variable, collapse = ", "),
+			". Inspect manually — may indicate large inland water bodies ",
+			"fully surrounded by NA in the source data."
+		)
+		print(excess_remaining)
+	}
+
+	## ALL BRT species (standard + tuned combined for prediction)
+	STANDARD_BRT_SPECIES <- c(
+		"Culex pipiens",
+		"Ixodes ricinus",
+		"Dermacentor marginatus"
+	)
+
+	TUNED_BRT_SPECIES <- c(
+		"Aedes albopictus",
+		"Dermacentor reticulatus",
+		"Haemaphysalis inermis",
+		"Hyalomma marginatum"
+	)
+
+	ALL_BRT_SPECIES <- c(STANDARD_BRT_SPECIES, TUNED_BRT_SPECIES)
+
+	## ESM species (updated for post-thinning tier assignments)
+	ESM_SPECIES <- c(
+		"Aedes aegypti", #"Aedes caspius", 
+		"Aedes vexans",
+		"Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
+		"Culex theileri", "Culex tritaeniorhynchus",
+		"Culiseta annulata", #"Culiseta longiareolata",
+		"Hyalomma aegyptium", "Rhipicephalus sanguineus"
+	)
+
+	## Taxon-to-covariate mapping (all BRT + ESM species)
+	ALL_MOSQUITO <- c("Culex pipiens", "Aedes albopictus",
+	                  "Aedes aegypti", #"Aedes caspius", 
+	                  "Aedes vexans",
+	                  "Anopheles maculipennis", "Anopheles plumbeus",
+	                  "Anopheles sacharovi", "Culex theileri",
+	                  "Culex tritaeniorhynchus",
+	                  "Culiseta annulata"#, "Culiseta longiareolata"
+	                  )
+
+	ALL_TICK <- c("Ixodes ricinus", "Dermacentor marginatus",
+	              "Dermacentor reticulatus", "Haemaphysalis inermis",
+	              "Hyalomma marginatum",
+	              "Hyalomma aegyptium", "Rhipicephalus sanguineus")
+
+	## Covariate sets (VIF-reduced)
+	MOSQUITO_COVARIATES <- MOSQUITO_VARS_FINAL
+	TICK_COVARIATES     <- TICK_VARS_FINAL
+
+## Helper: get covariates for any species
+	get_covariates_for_species <- function(sp_name) {
+		if (sp_name %in% ALL_MOSQUITO) return(MOSQUITO_COVARIATES)
+		if (sp_name %in% ALL_TICK)     return(TICK_COVARIATES)
+		stop("Species '", sp_name, "' not found in taxon lists.")
+	}
+
+	## Helper: get model path for a BRT species (routes to correct directory)
+	get_brt_model_path <- function(sp_name) {
+		sp_clean <- gsub(" ", "_", sp_name)
+		if (sp_name %in% STANDARD_BRT_SPECIES) {
+			file.path(STANDARD_BRT_MODEL_DIR,
+			          paste0(sp_clean, "_standard_brt_models.rds"))
+		} else {
+			file.path(TUNED_BRT_MODEL_DIR,
+			          paste0(sp_clean, "_tuned_brt_models.rds"))
+		}
+	}
 
 	## Clean month labels from the monthly_rasters list names
 	## Converts "Georgia_Covariates_Jan" → "Jan", etc.
-  	MONTH_LABELS <- gsub("Georgia_Covariates_", "", names(monthly_rasters))
-  	names(MONTH_LABELS) <- names(monthly_rasters)
+  MONTH_LABELS <- gsub("Georgia_Covariates_", "", names(monthly_raster_paths))
+    names(MONTH_LABELS) <- names(monthly_raster_paths)
 
 	## Ordered month sequence for consistent output
   	MONTH_ORDER <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -2697,31 +3624,25 @@ occurence_int_map
 
 
 # HELPER FUNCTIONS
-
-	#' Get the correct covariate vector for a given species
-  	get_covariates_for_species <- function(sp_name) {
-  		if (sp_name %in% c(TUNED_BRT_MOSQUITO)) return(MOSQUITO_COVARIATES)
-  		if (sp_name %in% c(TUNED_BRT_TICK))     return(TICK_COVARIATES)
-  		if (sp_name %in% ESM_TICK)               return(TICK_COVARIATES)
-  		## Default: ESM mosquitoes
-  		return(MOSQUITO_COVARIATES)
-  	}
-
-
 	#' Prepare a raster for BRT prediction by subsetting layers and factoring WorldCover
-  	prepare_raster_for_brt <- function(rast_stack, covariates) {
-  
-  		## Subset to the covariates this species needs
-  		  proj_raster <- rast_stack[[covariates]]
-  
-  		## Ensure WorldCover is treated as a factor
-    		if ("WorldCover" %in% names(proj_raster)) {
-    			proj_raster[["WorldCover"]] <- as.factor(proj_raster[["WorldCover"]])
-    		}
-  
-  		return(proj_raster)
-  	}
-
+    prepare_raster_for_brt <- function(rast_stack, covariates) {
+    
+        ## Subset to the covariates this species needs
+          proj_raster <- rast_stack[[covariates]]
+    
+        ## Ensure WorldCover is treated as a factor
+          if ("WorldCover" %in% names(proj_raster)) {
+              proj_raster[["WorldCover"]] <- as.factor(proj_raster[["WorldCover"]])
+          }
+    
+        ## Prepend a dummy presence layer so that column indices stored in
+        ## mod$gbm.call$gbm.x (which assumed presence = col 1 during training)
+        ## resolve correctly during terra::predict()
+          dummy_presence        <- proj_raster[[1]] * 0
+          names(dummy_presence) <- "presence"
+      
+          return(c(dummy_presence, proj_raster))
+    }
 
 	#' Generate mean + SD prediction from a list of 100 BRT models
 	#' Returns a two-layer SpatRaster (mean, sd) on the probability scale
@@ -2787,7 +3708,7 @@ occurence_int_map
 
 # PART 1: TUNED BRT PREDICTIONS (4 species × 100 models each)
 
-  	purrr::walk(TUNED_BRT_SPECIES, function(sp) {
+  	purrr::walk(ALL_BRT_SPECIES, function(sp) {
   
   		sp_clean   <- gsub(" ", "_", sp)
   		covariates <- get_covariates_for_species(sp)
@@ -2798,10 +3719,7 @@ occurence_int_map
   		cat("  Covariates:", length(covariates), "\n")
   
   		## Load saved model objects (list of 100 gbm.step objects)
-  		model_path <- file.path(
-  			TUNED_BRT_MODEL_DIR,
-  			paste0(sp_clean, "_tuned_brt_models.rds")
-  		)
+  		model_path <- get_brt_model_path(sp)
   
   		if (!file.exists(model_path)) {
   			cat("  ⚠ Model file not found:", model_path, "\n")
@@ -2843,14 +3761,15 @@ occurence_int_map
   			## Find the matching raster key in monthly_rasters
   			raster_key <- paste0("Georgia_Covariates_", month_label)
   
-  			if (!raster_key %in% names(monthly_rasters)) {
+        if (!raster_key %in% names(monthly_raster_paths)) {
   				cat("    ⚠ Missing raster for:", month_label, "\n")
   				return(invisible())
   			}
   
-  			month_proj <- prepare_raster_for_brt(
-  				monthly_rasters[[raster_key]], covariates
-  			)
+        month_proj <- prepare_raster_for_brt(
+          terra::rast(monthly_raster_paths[[raster_key]]),  ## load fresh from disk
+          covariates
+        )
   			month_pred <- predict_brt_ensemble(models, month_proj)
   
   			writeRaster(
@@ -2923,13 +3842,13 @@ occurence_int_map
   
   			raster_key <- paste0("Georgia_Covariates_", month_label)
   
-  			if (!raster_key %in% names(monthly_rasters)) {
+        if (!raster_key %in% names(monthly_raster_paths)) {
   				cat("    ⚠ Missing raster for:", month_label, "\n")
   				return(invisible())
   			}
 
 			## Subset monthly raster to ESM covariates
-			  month_proj <- monthly_rasters[[raster_key]][[covariates]]
+			  month_proj <- terra::rast(monthly_raster_paths[[raster_key]])[[covariates]]
 
   			month_pred <- tryCatch({
   				project_esm_to_raster(esm_model, esm_ensemble, month_proj)
@@ -2972,6 +3891,215 @@ occurence_int_map
   	))
 ```
 
+```{r Constructing Prediction Maps}
+## ── Configuration ────────────────────────────────────────────────────────────
+BASELINE_DIR  <- file.path(ONEDRIVE, "Paper2_Data/Predictions/Baseline")
+FIGURE_DIR    <- file.path(ONEDRIVE, "Paper2_Data/Figures/Species_Suitability")
+dir.create(FIGURE_DIR, showWarnings = FALSE, recursive = TRUE)
+
+## 16 species — Culiseta annulata dropped
+PLOT_SPECIES <- c(
+  "Aedes aegypti", "Aedes albopictus", "Aedes vexans",
+  "Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
+  "Culex pipiens", "Culex theileri", "Culex tritaeniorhynchus",
+  "Dermacentor marginatus", "Dermacentor reticulatus",
+  "Haemaphysalis inermis", "Hyalomma aegyptium", "Hyalomma marginatum",
+  "Ixodes ricinus", "Rhipicephalus sanguineus"
+)
+
+## Taxon grouping for panel ordering
+MOSQUITO_SPECIES_PLOT <- c(
+  "Aedes aegypti", "Aedes albopictus", "Aedes vexans",
+  "Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
+  "Culex pipiens", "Culex theileri", "Culex tritaeniorhynchus"
+)
+
+TICK_SPECIES_PLOT <- c(
+  "Dermacentor marginatus", "Dermacentor reticulatus",
+  "Haemaphysalis inermis", "Hyalomma aegyptium", "Hyalomma marginatum",
+  "Ixodes ricinus", "Rhipicephalus sanguineus"
+)
+
+
+## ── Load and mask a single species raster ────────────────────────────────────
+## georgia_union already excludes autonomous regions [1]
+load_masked_raster <- function(sp_name) {
+
+  sp_clean      <- gsub(" ", "_", sp_name)
+  baseline_path <- file.path(BASELINE_DIR, paste0(sp_clean, "_baseline.tif"))
+
+  if (!file.exists(baseline_path)) {
+    warning("Baseline raster not found for: ", sp_name)
+    return(NULL)
+  }
+
+  pred_rast <- terra::rast(baseline_path)
+
+  ## BRT = 2-layer [mean, sd]; ESM = 1-layer
+  mean_rast <- if (terra::nlyr(pred_rast) >= 2) pred_rast[[1]] else pred_rast
+
+  ## Mask to georgia_union (excludes Abkhazia + South Ossetia)
+  georgia_vect <- terra::vect(georgia_union)
+  mean_rast    <- terra::mask(mean_rast, georgia_vect)
+
+  names(mean_rast) <- sp_name
+  mean_rast
+}
+
+
+## ── Build a single species panel ─────────────────────────────────────────────
+plot_species_suitability <- function(sp_name, rast_obj) {
+
+  ## Convert to data frame for ggplot
+  suit_df <- terra::as.data.frame(rast_obj, xy = TRUE) |>
+    dplyr::rename(suitability = 3) |>
+    dplyr::filter(!is.na(suitability))
+
+  ## Italicised species label
+  sp_label <- bquote(italic(.(sp_name)))
+
+  ggplot() +
+    ## Grey base: full country including autonomous regions (visual context)
+    geom_sf(
+      data      = georgia_admin0,
+      fill      = "grey92",
+      colour    = NA
+    ) +
+    ## Suitability surface (autonomous regions will be blank — masked above)
+    geom_raster(
+      data    = suit_df,
+      mapping = aes(x = x, y = y, fill = suitability)
+    ) +
+    ## Municipal boundaries (light, non-distracting)
+    geom_sf(
+      data      = muni_boundaries,
+      fill      = NA,
+      colour    = "white",
+      linewidth = 0.15
+    ) +
+    ## Outer country border
+    geom_sf(
+      data      = georgia_admin0,
+      fill      = NA,
+      colour    = "grey40",
+      linewidth = 0.3
+    ) +
+    scale_fill_viridis_c(
+      option   = "viridis",
+      name     = "Suitability",
+      limits   = c(0, 1),
+      breaks   = c(0, 0.5, 1),
+      labels   = c("0", "0.5", "1"),
+      na.value = "transparent",
+      guide    = guide_colorbar(
+        barwidth  = 0.4,
+        barheight = 3,
+        ticks     = FALSE
+      )
+    ) +
+    labs(title = sp_label) +
+    coord_sf(expand = FALSE) +
+    theme_void(base_size = 9) +
+    theme(
+      plot.title       = element_text(
+        size   = 8,
+        hjust  = 0.5,
+        face   = "italic",
+        margin = ggplot2::margin(b = 2)
+      ),
+      legend.position  = "right",
+      legend.title     = element_text(size = 7),
+      legend.text      = element_text(size = 6),
+      plot.margin      = ggplot2::margin(4, 4, 4, 4)
+    )
+}
+
+
+## ── Render and save individual species maps ───────────────────────────────────
+purrr::walk(PLOT_SPECIES, function(sp) {
+
+  rast_obj <- load_masked_raster(sp)
+  if (is.null(rast_obj)) return(invisible())
+
+  p        <- plot_species_suitability(sp, rast_obj)
+  sp_clean <- gsub(" ", "_", sp)
+
+  ggsave(
+    filename = file.path(FIGURE_DIR, paste0(sp_clean, "_suitability.svg")),
+    plot     = p,
+    width    = 4,
+    height   = 2.5,
+    dpi      = 900
+  )
+
+  rm(rast_obj); gc()
+  cat("  ✓", sp, "\n")
+})
+
+
+## ── Composite panel: mosquitoes ───────────────────────────────────────────────
+mosquito_plots <- purrr::map(MOSQUITO_SPECIES_PLOT, function(sp) {
+  rast_obj <- load_masked_raster(sp)
+  if (is.null(rast_obj)) return(NULL)
+  plot_species_suitability(sp, rast_obj) +
+    theme(legend.position = "none")
+})
+
+mosquito_panel <- patchwork::wrap_plots(
+  purrr::compact(mosquito_plots),
+  ncol = 3
+) +
+  patchwork::plot_annotation(
+    title    = "Mosquito Species — Predicted Habitat Suitability (Baseline)",
+    subtitle = "Autonomous regions of Abkhazia and South Ossetia excluded",
+    theme    = theme(
+      plot.title    = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 9, colour = "grey40")
+    )
+  )
+
+ggsave(
+  filename = file.path(FIGURE_DIR, "mosquito_species_panel.png"),
+  plot     = mosquito_panel,
+  width    = 12,
+  height   = 10,
+  dpi      = 300
+)
+cat("  ✓ Mosquito panel saved\n")
+
+
+## ── Composite panel: ticks ────────────────────────────────────────────────────
+tick_plots <- purrr::map(TICK_SPECIES_PLOT, function(sp) {
+  rast_obj <- load_masked_raster(sp)
+  if (is.null(rast_obj)) return(NULL)
+  plot_species_suitability(sp, rast_obj) +
+    theme(legend.position = "none")
+})
+
+tick_panel <- patchwork::wrap_plots(
+  purrr::compact(tick_plots),
+  ncol = 3
+) +
+  patchwork::plot_annotation(
+    title    = "Tick Species — Predicted Habitat Suitability (Baseline)",
+    subtitle = "Autonomous regions of Abkhazia and South Ossetia excluded",
+    theme    = theme(
+      plot.title    = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 9, colour = "grey40")
+    )
+  )
+
+ggsave(
+  filename = file.path(FIGURE_DIR, "tick_species_panel.png"),
+  plot     = tick_panel,
+  width    = 12,
+  height   = 9,
+  dpi      = 300
+)
+cat("  ✓ Tick panel saved\n")
+cat("\nAll figures saved to:", FIGURE_DIR, "\n")
+```
+
 ```{r Model Evaluation and Landscape Summaries}
 
 set.seed(1999)
@@ -2998,7 +4126,7 @@ set.seed(1999)
 	## Species lists by modeling tier
   	STANDARD_BRT_SPECIES <- c(
   		"Culex pipiens", "Ixodes ricinus", "Aedes albopictus",
-  		"Dermacentor marginatus", "Dermacentor reticulatus", "Aedes caspius"
+  		"Dermacentor marginatus", "Dermacentor reticulatus"#, "Aedes caspius"
   	)
 
   	TUNED_BRT_SPECIES <- c(
@@ -3007,9 +4135,9 @@ set.seed(1999)
   	)
 
   	ESM_SPECIES <- c(
-  		"Aedes aegypti", "Aedes geniculatus",
+  		"Aedes aegypti", #"Aedes geniculatus",
   		"Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
-  		"Culex tritaeniorhynchus", "Culiseta annulata", "Culiseta longiareolata",
+  		"Culex tritaeniorhynchus", "Culiseta annulata", #"Culiseta longiareolata",
   		"Hyalomma aegyptium", "Rhipicephalus sanguineus"
   	)
 
@@ -3393,49 +4521,45 @@ set.seed(1999)
 # PART 3: MUNICIPAL-LEVEL SUMMARIES
 
 	## Convert SpatVector to sf for exactextractr compatibility
-	  georgia_sf <- st_as_sf(Georgia_adm2)
+	  #georgia_sf <- st_as_sf(Georgia_adm2)
 
-  	municipal_summary <- purrr::map_dfr(ALL_SPECIES, function(sp) {
-  
-  		sp_clean <- gsub(" ", "_", sp)
-  		cat("  Processing:", sp, "...")
-  
-  		baseline_path <- file.path(BASELINE_DIR, paste0(sp_clean, "_baseline.tif"))
-  
-  		if (!file.exists(baseline_path)) {
-  			cat(" ⚠ not found\n")
-  			return(tibble(
-  				species = sp, NAME_2 = georgia_sf$NAME_2,
-  				GID_2 = georgia_sf$GID_2,
-  				municipal_mean = NA, municipal_sd = NA
-  			))
-  		}
-  
-  		pred_rast <- rast(baseline_path)
+    municipal_summary <- purrr::map_dfr(ALL_SPECIES, function(sp) {
 
-		## Use the mean prediction layer
-		  mean_rast <- if (nlyr(pred_rast) >= 2) pred_rast[[1]] else pred_rast
+        sp_clean <- gsub(" ", "_", sp)
+        cat("  Processing:", sp, "...")
 
-		## Area-weighted mean suitability per municipality
-		  muni_mean <- exact_extract(mean_rast, georgia_sf, fun = "mean")
+        baseline_path <- file.path(BASELINE_DIR, paste0(sp_clean, "_baseline.tif"))
 
-		## Area-weighted standard deviation per municipality
-		  muni_sd <- exact_extract(mean_rast, georgia_sf, fun = "stdev")
+        if (!file.exists(baseline_path)) {
+            cat(" ⚠ not found\n")
+            return(tibble(
+                species             = sp,
+                municipality_mapped = muni_boundaries$municipality_mapped,
+                municipal_mean      = NA_real_,
+                municipal_sd        = NA_real_
+            ))
+        }
 
-  		
-  		tibble(
-  			species        = sp,
-  			NAME_2         = georgia_sf$NAME_2,
-  			GID_2          = georgia_sf$GID_2,
-  			municipal_mean = round(muni_mean, 5),
-  			municipal_sd   = round(muni_sd, 5)
-  		)
-  	})
+        pred_rast <- rast(baseline_path)
+
+        ## Use the mean prediction layer
+          mean_rast <- if (nlyr(pred_rast) >= 2) pred_rast[[1]] else pred_rast
+
+        ## Area-weighted mean suitability per municipality
+          muni_mean <- exact_extract(mean_rast, muni_boundaries, fun = "mean")
+
+        ## Area-weighted standard deviation per municipality
+          muni_sd   <- exact_extract(mean_rast, muni_boundaries, fun = "stdev")
+
+        tibble(
+            species             = sp,
+            municipality_mapped = muni_boundaries$municipality_mapped,
+            municipal_mean      = round(muni_mean, 5),
+            municipal_sd        = round(muni_sd, 5)
+        )
+    })
 
   	cat("\n  Municipal summary rows:", nrow(municipal_summary), "\n")
-  	cat("  Species × Municipalities:",
-  	    n_distinct(municipal_summary$species), "×",
-  	    n_distinct(municipal_summary$NAME_2), "\n")
 
 
 # PART 4: SAVE ALL OUTPUTS
@@ -3454,229 +4578,31 @@ set.seed(1999)
   	)
   	cat("  ✓ national_landscape_summary.csv\n")
 
-	## Municipal-level summary (long format: one row per species × municipality)
-  	write_csv(
-  		municipal_summary,
-  		file.path(OUTPUT_DIR, "municipal_baseline_summary.csv")
-  	)
-  	cat("  ✓ municipal_baseline_summary.csv\n")
+  ## Municipal-level summary (long format)
+    write_csv(
+        municipal_summary,
+        file.path(OUTPUT_DIR, "municipal_baseline_summary.csv")
+    )
+    cat("  ✓ municipal_baseline_summary.csv\n")
 
-	## Wide-format version for easier cross-species comparison
-	## One row per municipality, columns for each species' mean suitability
-  	municipal_wide <- municipal_summary |>
-  		dplyr::select(species, NAME_2, GID_2, municipal_mean) |>
-  		pivot_wider(
-  			names_from  = species,
-  			values_from = municipal_mean,
-  			names_prefix = "suit_"
-  		)
+  ## Wide-format version
+    municipal_wide <- municipal_summary |>
+        dplyr::select(species, municipality_mapped, municipal_mean) |>
+        pivot_wider(
+            names_from   = species,
+            values_from  = municipal_mean,
+            names_prefix = "suit_"
+        )
 
-	write_csv(
-		municipal_wide,
-		file.path(OUTPUT_DIR, "municipal_baseline_summary_wide.csv")
-	)
-	cat("  ✓ municipal_baseline_summary_wide.csv\n")
+    write_csv(
+        municipal_wide,
+        file.path(OUTPUT_DIR, "municipal_baseline_summary_wide.csv")
+    )
+    cat("  ✓ municipal_baseline_summary_wide.csv\n")
 
 	cat("\nAll outputs saved to:", OUTPUT_DIR, "\n")
 
 
-```
-
-```{r Species Distribution Maps — Baseline Mean Suitability}
-  
-  # Convert once outside the map2() call to avoid repeated conversion overhead
-    Georgia_adm2_sf <- sf::st_as_sf(Georgia_adm2)
-    
-    map_pairs <- purrr::map2(
-        tif_files,
-        sp_labels,
-        function(tif_path, sp_label) {
-    
-            mean_rast        <- rast(tif_path)[[1]]
-            names(mean_rast) <- "suitability"
-            mean_rast        <- clamp(mean_rast, lower = 0, upper = 1)
-    
-            # exact_extract requires an sf object, not SpatVector
-            zonal_df <- exactextractr::exact_extract(
-                mean_rast,
-                Georgia_adm2_sf,
-                fun         = "mean",
-                append_cols = "NAME_2",
-                progress    = FALSE
-            ) |>
-                dplyr::rename(mean_suit = mean)
-    
-            Georgia_zonal <- Georgia_adm2_sf |>
-                dplyr::left_join(zonal_df, by = "NAME_2")
-    
-            p_viridis <- ggplot() +
-                tidyterra::geom_spatraster(data = mean_rast) +
-                geom_sf(data = Georgia_adm2_sf, fill = NA, colour = "grey30", linewidth = 0.4) +
-                scale_fill_viridis_c(
-                    option   = "viridis",
-                    name     = "Suitability",
-                    limits   = c(0, 1),
-                    breaks   = seq(0, 1, by = 0.25),
-                    na.value = "transparent"
-                ) +
-                labs(
-                    title    = bquote(italic(.(sp_label))),
-                    subtitle = "Baseline mean habitat suitability"
-                ) +
-                .map_theme()
-    
-            p_zonal <- ggplot() +
-                geom_sf(
-                    data      = Georgia_zonal,
-                    mapping   = aes(fill = mean_suit),
-                    colour    = "grey30",
-                    linewidth = 0.4
-                ) +
-                scale_fill_viridis_c(
-                    option   = "viridis",
-                    name     = "Mean\nsuitability",
-                    limits   = c(0, 1),
-                    breaks   = seq(0, 1, by = 0.25),
-                    na.value = "grey85"
-                ) +
-                labs(
-                    title    = bquote(italic(.(sp_label))),
-                    subtitle = "Baseline mean suitability by municipality"
-                ) +
-                .map_theme()
-    
-            list(viridis = p_viridis, zonal = p_zonal)
-        }
-    )
-    
-    distribution_maps_viridis <- purrr::map(map_pairs, "viridis") |> purrr::set_names(sp_labels)
-    distribution_maps_zonal   <- purrr::map(map_pairs, "zonal")   |> purrr::set_names(sp_labels)
-    
-    
-    EXPORT_DIR <- r"(C:\Users\ianpsheasmith\OneDrive - University of Florida\General - Georgia Ticks\Georgia_Ticks\Paper2_Data\Predictions\ESM_BRT_Updated_Predictions)"
-    
-    purrr::walk2(
-        distribution_maps_zonal,
-        names(distribution_maps_zonal),
-        function(plot, sp_label) {
-    
-            # Strip titles and legend from the existing plot at export time
-            p_export <- plot +
-                labs(title = NULL, subtitle = NULL) +
-                theme(legend.position = "none")
-    
-            # Replace spaces with underscores for a clean filename
-            filename <- file.path(
-                EXPORT_DIR,
-                paste0(stringr::str_replace_all(sp_label, " ", "_"), "_zonal.svg")
-            )
-    
-            ggplot2::ggsave(
-                filename = filename,
-                plot     = p_export,
-                device   = "svg",
-                width    = 6,
-                height   = 4,
-                units    = "in"
-            )
-        }
-    )
-  
-  
-  # Genera used to classify mosquitoes
-    MOSQUITO_GENERA <- c("Aedes", "Culex", "Anopheles", "Culiseta")
-    
-    is_mosquito <- function(sp_label) stringr::word(sp_label, 1) %in% MOSQUITO_GENERA
-  
-  # Build a long sf object with mean suitability for all species
-    zonal_long <- purrr::map2(
-        tif_files,
-        sp_labels,
-        function(tif_path, sp_label) {
-    
-            mean_rast        <- rast(tif_path)[[1]]
-            names(mean_rast) <- "suitability"
-            mean_rast        <- clamp(mean_rast, lower = 0, upper = 1)
-    
-            exactextractr::exact_extract(
-                mean_rast,
-                Georgia_adm2_sf,
-                fun         = "mean",
-                append_cols = "NAME_2",
-                progress    = FALSE
-            ) |>
-                dplyr::rename(mean_suit = mean) |>
-                dplyr::mutate(species = sp_label)
-        }
-    ) |>
-        dplyr::bind_rows() |>
-        dplyr::left_join(Georgia_adm2_sf, by = "NAME_2") |>
-        sf::st_as_sf()
-  
-  # Split into mosquito and tick subsets
-    mosquito_long <- zonal_long |> dplyr::filter(purrr::map_lgl(species, is_mosquito))
-    tick_long     <- zonal_long |> dplyr::filter(!purrr::map_lgl(species, is_mosquito))
-    
-    .build_facet_panel <- function(data_long, strip_fill = "grey95", ncol = 4) {
-    
-        data_long <- data_long |>
-            dplyr::mutate(species = stringr::str_replace(species, " ", "\n"))
-    
-        ggplot(data_long) +
-            geom_sf(aes(fill = mean_suit), colour = NA) +
-            scale_fill_viridis_c(
-                option   = "viridis",
-                limits   = c(0, 1),
-                breaks   = seq(0, 1, by = 0.25),
-                na.value = "grey85",
-                guide    = "none"
-            ) +
-            facet_wrap(~ species, ncol = ncol) +
-            theme_void(base_size = 11) +
-            theme(
-                strip.background = element_rect(fill = strip_fill, colour = "grey70",
-                                                linewidth = 0.5),
-                strip.text       = element_text(face = "bold.italic", size = 7.5,  # reduced from 8.5
-                                                lineheight = 1.15,
-                                                margin = ggplot2::margin(t = 3, b = 3,
-                                                                         l = 6, r = 6)),  # wider l/r padding widens boxes uniformly
-                strip.clip       = "off",
-                panel.border     = element_rect(fill = NA, colour = "grey70",
-                                                linewidth = 0.5),
-                panel.spacing    = unit(0.25, "cm"),   # reduced from 0.5
-                plot.margin      = ggplot2::margin(4, 4, 4, 4)  # reduced from 8
-            )
-    }
-  
-  # Reassemble with corrected groupings
-    mosquito_figure <- .build_facet_panel(mosquito_long, strip_fill = "#e6f2ff")
-    tick_figure     <- .build_facet_panel(tick_long,     strip_fill = "#e6ffe6")
-    
-    mosquito_figure
-    tick_figure
-  
-  # Export
-    purrr::walk2(
-        list(mosquito_figure,     tick_figure),
-        c("mosquito_zonal_panel", "tick_zonal_panel"),
-        function(fig, fname) {
-    
-            n_panels <- if (stringr::str_detect(fname, "mosquito")) {
-                length(unique(mosquito_long$species))
-            } else {
-                length(unique(tick_long$species))
-            }
-    
-            ggplot2::ggsave(
-                filename = file.path(EXPORT_DIR, paste0(fname, ".svg")),
-                plot     = fig,
-                device   = "svg",
-                width    = 14,
-                height   = ceiling(n_panels / 4) * 4.5,
-                units    = "in"
-            )
-        }
-    )
 ```
 
 ```{r maxSSS Thresholds and Landscape Proportion}
@@ -3699,7 +4625,7 @@ set.seed(1999)
     ## Species by tier
       STANDARD_BRT_SPECIES <- c(
         "Culex pipiens", "Ixodes ricinus", "Aedes albopictus",
-        "Dermacentor marginatus", "Dermacentor reticulatus", "Aedes caspius"
+        "Dermacentor marginatus", "Dermacentor reticulatus"#, "Aedes caspius"
       )
 
       TUNED_BRT_SPECIES <- c(
@@ -3708,9 +4634,9 @@ set.seed(1999)
       )
 
       ESM_SPECIES <- c(
-        "Aedes aegypti", "Aedes geniculatus",
+        "Aedes aegypti", #"Aedes geniculatus",
         "Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
-        "Culex tritaeniorhynchus", "Culiseta annulata", "Culiseta longiareolata",
+        "Culex tritaeniorhynchus", "Culiseta annulata", #"Culiseta longiareolata",
         "Hyalomma aegyptium", "Rhipicephalus sanguineus"
       )
 
@@ -4050,7 +4976,7 @@ set.seed(1999)
 		## Emerging Aedes-borne Viruses (CHIKV / DENV / ZIKV)
 		"aedes_arbo",      "Aedes aegypti",              1.00,        0.90,          1.00,
 		"aedes_arbo",      "Aedes albopictus",           0.90,        0.80,          1.00,
-		"aedes_arbo",      "Aedes geniculatus",          0.15,        0.05,          0.25,
+		#"aedes_arbo",      "Aedes geniculatus",          0.15,        0.05,          0.25,
 		"aedes_arbo",      "Aedes vexans",               0.05,        0.01,          0.10,
 
 		## West Nile Virus Complex (WNV / USUV / SINV)
@@ -4058,7 +4984,7 @@ set.seed(1999)
 		"wnv_complex",     "Culex theileri",             0.50,        0.30,          0.70,
 		"wnv_complex",     "Culex tritaeniorhynchus",    0.40,        0.20,          0.60,
 		"wnv_complex",     "Aedes vexans",               0.15,        0.05,          0.25,
-		"wnv_complex",     "Culiseta annulata",          0.15,        0.05,          0.25,
+		#"wnv_complex",     "Culiseta annulata",          0.15,        0.05,          0.25,
 
 		## Malaria (Plasmodium falciparum / P. vivax)
 		"malaria",         "Anopheles sacharovi",        1.00,        0.90,          1.00,
@@ -4146,10 +5072,13 @@ set.seed(1999)
 		)
 	}
 
-	## Municipalities
-	municipalities <- municipal_suit |>
-		dplyr::select(NAME_2, GID_2) |>
-		distinct()
+
+  ## Municipalities
+    municipalities <- municipal_suit |>
+        dplyr::select(municipality_mapped) |>
+        distinct()
+
+    n_municipalities <- nrow(municipalities)
 
 	n_municipalities <- nrow(municipalities)
 	disease_groups   <- unique(disease_weights$disease_group)
@@ -4255,14 +5184,13 @@ set.seed(1999)
 ## Convert to a named list of named vectors for fast lookup:
 ##   suit_lookup[["species_name"]] → named vector (municipality → mean suitability)
 
-	suit_lookup <- municipal_suit |>
-		dplyr::filter(species %in% unique(disease_weights$species)) |>
-		dplyr::select(species, NAME_2, municipal_mean) |>
-		split(~species) |>
-		purrr::map(~ set_names(.x$municipal_mean, .x$NAME_2))
+    suit_lookup <- municipal_suit |>
+        split(~species) |>
+        purrr::map(\(df) set_names(df$municipal_mean, df$municipality_mapped))
 
 	cat("Built suitability lookup for", length(suit_lookup), "species\n\n")
 
+	
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MONTE CARLO SIMULATION
@@ -4288,12 +5216,13 @@ set.seed(1999)
 		group_species <- group_spec$species
 
 		## Pre-allocate result matrix (municipalities × iterations)
-		result_mat <- matrix(
-			NA_real_,
-			nrow = n_municipalities,
-			ncol = N_ITERATIONS,
-			dimnames = list(municipalities$NAME_2, NULL)
-		)
+      result_mat <- matrix(
+          NA_real_,
+          nrow     = n_municipalities,
+          ncol     = N_ITERATIONS,
+          dimnames = list(municipalities$municipality_mapped, NULL)  ## ← was NAME_2
+      )
+
 
 		## Run all iterations using vectorised operations
 		purrr::walk(seq_len(N_ITERATIONS), function(iter) {
@@ -4316,7 +5245,7 @@ set.seed(1999)
 					thresh <- threshold_samples[[sp]][iter]
 
 					## Municipal mean suitability values
-					suit_vals <- suit_lookup[[sp]][municipalities$NAME_2]
+					suit_vals <- suit_lookup[[sp]][municipalities$municipality_mapped]
 
 					## Binary classification: suitable if mean suitability >= threshold
 					binary <- as.numeric(suit_vals >= thresh)
@@ -4336,6 +5265,111 @@ set.seed(1999)
 
 	cat("  Monte Carlo simulation complete.\n\n")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WEIGHT-ONLY SENSITIVITY: VARIANCE DECOMPOSITION
+# ─────────────────────────────────────────────────────────────────────────────
+## Re-runs MC with thresholds fixed at their ensemble means to isolate
+## the contribution of weight uncertainty to total output variance.
+## Variance attributable to threshold uncertainty = total_var - weight_var.
+## A weight_var_fraction near 0 confirms weights are not the dominant
+## driver — the finding from the previous analysis remains valid.
+
+	cat("Running weight-only MC for variance decomposition...\n")
+
+	## Fixed thresholds: ensemble mean only (no sampling)
+	threshold_fixed <- thresholds |>
+		dplyr::filter(species %in% unique(disease_weights$species)) |>
+		dplyr::select(species, maxsss_mean) |>
+		tibble::deframe()
+
+	mc_results_weights_only <- purrr::map(disease_groups, function(dg) {
+
+		group_spec    <- disease_weights |> dplyr::filter(disease_group == dg)
+		group_species <- group_spec$species
+
+		result_mat <- matrix(
+			NA_real_,
+			nrow     = n_municipalities,
+			ncol     = N_ITERATIONS,
+			dimnames = list(municipalities$municipality_mapped, NULL)
+		)
+
+		purrr::walk(seq_len(N_ITERATIONS), function(iter) {
+
+			## Sampled weights, renormalised
+			raw_weights  <- purrr::map_dbl(group_species, \(sp) {
+				weight_samples[[paste(dg, sp, sep = "::")]][iter]
+			})
+			norm_weights <- raw_weights / sum(raw_weights)
+
+			## Fixed thresholds — no sampling
+			weighted_binary <- purrr::map2_dfc(
+				group_species,
+				norm_weights,
+				function(sp, wt) {
+					thresh    <- threshold_fixed[[sp]]           ## fixed mean
+					suit_vals <- suit_lookup[[sp]][municipalities$municipality_mapped]
+					binary    <- as.numeric(suit_vals >= thresh)
+					tibble(!!sp := binary * wt)
+				}
+			)
+
+			result_mat[, iter] <<- rowSums(weighted_binary, na.rm = TRUE)
+		})
+
+		result_mat
+	}) |>
+		set_names(disease_groups)
+
+	cat("  Weight-only MC complete.\n\n")
+
+
+	## Compute per-municipality variance for each disease group under both runs
+	variance_decomposition <- purrr::map_dfr(disease_groups, function(dg) {
+
+		mat_total  <- mc_results[[dg]]
+		mat_weight <- mc_results_weights_only[[dg]]
+
+		tibble(
+			disease_group          = dg,
+			municipality_mapped    = rownames(mat_total),
+			var_total              = apply(mat_total,  1, var, na.rm = TRUE),
+			var_weight_only        = apply(mat_weight, 1, var, na.rm = TRUE),
+			var_threshold_only     = var_total - var_weight_only
+		) |>
+			mutate(
+				weight_var_fraction    = var_weight_only / pmax(var_total, 1e-10),
+				threshold_var_fraction = 1 - weight_var_fraction
+			)
+	}) |>
+		left_join(disease_labels, by = "disease_group")
+
+
+	## Group-level summary
+	cat("══════════════════════════════════════════════════════════════\n")
+	cat("  VARIANCE DECOMPOSITION: WEIGHTS vs. THRESHOLDS\n")
+	cat("══════════════════════════════════════════════════════════════\n\n")
+
+	variance_decomposition |>
+		group_by(disease_group, disease_label) |>
+		summarise(
+			mean_weight_frac     = round(mean(weight_var_fraction,    na.rm = TRUE), 3),
+			mean_threshold_frac  = round(mean(threshold_var_fraction, na.rm = TRUE), 3),
+			.groups = "drop"
+		) |>
+		arrange(desc(mean_weight_frac)) |>
+		print(n = 20, width = Inf)
+
+	cat("\n  Interpretation:\n")
+	cat("    weight_frac near 0 → variance driven by threshold uncertainty\n")
+	cat("    weight_frac near 1 → variance driven by weight uncertainty\n\n")
+
+	## Save
+	write_csv(
+		variance_decomposition,
+		file.path(OUTPUT_DIR, "variance_decomposition_weights_vs_thresholds.csv")
+	)
+	cat("  Saved: variance_decomposition_weights_vs_thresholds.csv\n")	
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SUMMARISE MC RESULTS
@@ -4345,21 +5379,21 @@ set.seed(1999)
 ##   - SD (uncertainty)
 ##   - 2.5th and 97.5th percentiles (95% credible interval)
 
-	disease_exposure <- purrr::map_dfr(disease_groups, function(dg) {
+    disease_exposure <- purrr::map_dfr(disease_groups, function(dg) {
 
-		mat <- mc_results[[dg]]
+        mat <- mc_results[[dg]]
 
-		tibble(
-			disease_group = dg,
-			NAME_2        = municipalities$NAME_2,
-			GID_2         = municipalities$GID_2,
-			exposure_mean = rowMeans(mat, na.rm = TRUE),
-			exposure_sd   = apply(mat, 1, sd, na.rm = TRUE),
-			exposure_q025 = apply(mat, 1, quantile, probs = 0.025, na.rm = TRUE),
-			exposure_q975 = apply(mat, 1, quantile, probs = 0.975, na.rm = TRUE)
-		)
-	}) |>
-		left_join(disease_labels, by = "disease_group")
+        tibble(
+            disease_group       = dg,
+            municipality_mapped = rownames(mat),
+            exposure_mean       = rowMeans(mat, na.rm = TRUE),
+            exposure_sd         = apply(mat, 1, sd, na.rm = TRUE),
+            exposure_q025       = apply(mat, 1, quantile, 0.025, na.rm = TRUE),
+            exposure_q975       = apply(mat, 1, quantile, 0.975, na.rm = TRUE)
+        )
+    }) |>
+        ## Attach human-readable disease group labels
+        left_join(disease_labels, by = "disease_group")
 
 	cat("══════════════════════════════════════════════════════════════\n")
 	cat("  DISEASE EXPOSURE SUMMARY (Baseline)\n")
@@ -4421,21 +5455,6 @@ set.seed(1999)
 	)
 	cat("  ✓ disease_exposure_mc_baseline.csv\n")
 
-	## Wide format: one row per municipality, columns per disease group
-	disease_exposure_wide <- disease_exposure |>
-		dplyr::select(NAME_2, GID_2, disease_group, exposure_mean) |>
-		pivot_wider(
-			names_from  = disease_group,
-			values_from = exposure_mean,
-			names_prefix = "exposure_"
-		)
-
-	write_csv(
-		disease_exposure_wide,
-		file.path(OUTPUT_DIR, "disease_exposure_mc_baseline_wide.csv")
-	)
-	cat("  ✓ disease_exposure_mc_baseline_wide.csv\n")
-
 	## Sensitivity summary
 	write_csv(
 		sensitivity_summary,
@@ -4456,11 +5475,11 @@ set.seed(1999)
 ## ═══════════════════════════════════════════════════════════════════════════════
 
 ## Join exposure data to spatial object
-exposure_sf <- Georgia_adm2_sf |>
+exposure_sf <- muni_boundaries |>
     left_join(
         disease_exposure |>
-            dplyr::select(GID_2, disease_group, disease_label, exposure_mean),
-        by = "GID_2"
+            dplyr::select(municipality_mapped, disease_group, disease_label, exposure_mean),
+        by = "municipality_mapped"
     )
 
 ## Compute shared scale limits across all disease groups
@@ -4568,7 +5587,7 @@ set.seed(1999)
 		## Emerging Aedes-borne Viruses (CHIKV / DENV / ZIKV)
 		"aedes_arbo",      "Aedes aegypti",              1.00,        0.90,          1.00,
 		"aedes_arbo",      "Aedes albopictus",           0.90,        0.80,          1.00,
-		"aedes_arbo",      "Aedes geniculatus",          0.15,        0.05,          0.25,
+		#"aedes_arbo",      "Aedes geniculatus",          0.15,        0.05,          0.25,
 		"aedes_arbo",      "Aedes vexans",               0.05,        0.01,          0.10,
 
 		## West Nile Virus Complex (WNV / USUV / SINV)
@@ -4576,7 +5595,7 @@ set.seed(1999)
 		"wnv_complex",     "Culex theileri",             0.50,        0.30,          0.70,
 		"wnv_complex",     "Culex tritaeniorhynchus",    0.40,        0.20,          0.60,
 		"wnv_complex",     "Aedes vexans",               0.15,        0.05,          0.25,
-		"wnv_complex",     "Culiseta annulata",          0.15,        0.05,          0.25,
+		#"wnv_complex",     "Culiseta annulata",          0.15,        0.05,          0.25,
 
 		## Malaria (Plasmodium falciparum / P. vivax)
 		"malaria",         "Anopheles sacharovi",        1.00,        0.90,          1.00,
@@ -4646,9 +5665,9 @@ set.seed(1999)
 		dplyr::filter(species %in% available_species)
 
 	## Municipality reference table
-	municipalities <- municipal_suit |>
-		dplyr::select(NAME_2, GID_2) |>
-		distinct()
+    municipalities <- municipal_suit |>
+        dplyr::select(municipality_mapped) |>
+        distinct()
 
 	n_municipalities <- nrow(municipalities)
 	disease_groups   <- unique(disease_weights$disease_group)
@@ -4712,11 +5731,9 @@ set.seed(1999)
 # ─────────────────────────────────────────────────────────────────────────────
 ## Named list of named vectors: suit_lookup[["species"]] → c(muni1 = val, ...)
 
-	suit_lookup <- municipal_suit |>
-		dplyr::filter(species %in% unique(disease_weights$species)) |>
-		dplyr::select(species, NAME_2, municipal_mean) |>
-		split(~species) |>
-		purrr::map(~ set_names(.x$municipal_mean, .x$NAME_2))
+    suit_lookup <- municipal_suit |>
+        split(~species) |>
+        purrr::map(\(df) set_names(df$municipal_mean, df$municipality_mapped))
 
 	cat("Built suitability lookup for", length(suit_lookup), "species\n\n")
 
@@ -4744,17 +5761,17 @@ set.seed(1999)
 		group_species <- group_spec$species
 
 		## Pre-allocate result matrix (municipalities × iterations)
-		result_mat <- matrix(
-			NA_real_,
-			nrow     = n_municipalities,
-			ncol     = N_ITERATIONS,
-			dimnames = list(municipalities$NAME_2, NULL)
-		)
+      result_mat <- matrix(
+          NA_real_,
+          nrow     = n_municipalities,
+          ncol     = N_ITERATIONS,
+          dimnames = list(municipalities$municipality_mapped, NULL)  ## ← was NAME_2
+      )
 
 		## Vectorised municipality suitability values for this group's species
 		## Matrix: municipalities (rows) × species (cols)
 		suit_matrix <- purrr::map(group_species, function(sp) {
-			suit_lookup[[sp]][municipalities$NAME_2]
+			suit_lookup[[sp]][municipalities$municipality_mapped]
 		}) |>
 			set_names(group_species) |>
 			bind_cols() |>
@@ -4789,21 +5806,21 @@ set.seed(1999)
 # SUMMARISE MC RESULTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-	disease_exposure <- purrr::map_dfr(disease_groups, function(dg) {
+    disease_exposure <- purrr::map_dfr(disease_groups, function(dg) {
 
-		mat <- mc_results[[dg]]
+        mat <- mc_results[[dg]]
 
-		tibble(
-			disease_group = dg,
-			NAME_2        = municipalities$NAME_2,
-			GID_2         = municipalities$GID_2,
-			exposure_mean = rowMeans(mat, na.rm = TRUE),
-			exposure_sd   = apply(mat, 1, sd, na.rm = TRUE),
-			exposure_q025 = apply(mat, 1, quantile, probs = 0.025, na.rm = TRUE),
-			exposure_q975 = apply(mat, 1, quantile, probs = 0.975, na.rm = TRUE)
-		)
-	}) |>
-		left_join(disease_labels, by = "disease_group")
+        tibble(
+            disease_group       = dg,
+            municipality_mapped = rownames(mat),
+            exposure_mean       = rowMeans(mat, na.rm = TRUE),
+            exposure_sd         = apply(mat, 1, sd, na.rm = TRUE),
+            exposure_q025       = apply(mat, 1, quantile, 0.025, na.rm = TRUE),
+            exposure_q975       = apply(mat, 1, quantile, 0.975, na.rm = TRUE)
+        )
+    }) |>
+        ## Attach human-readable disease group labels
+        left_join(disease_labels, by = "disease_group")
 
 
 	cat("══════════════════════════════════════════════════════════════\n")
@@ -4898,21 +5915,6 @@ set.seed(1999)
 	)
 	cat("  ✓ disease_exposure_continuous_mc_baseline.csv\n")
 
-	## Wide format
-	disease_exposure_wide <- disease_exposure |>
-		dplyr::select(NAME_2, GID_2, disease_group, exposure_mean) |>
-		pivot_wider(
-			names_from  = disease_group,
-			values_from = exposure_mean,
-			names_prefix = "exposure_"
-		)
-
-	write_csv(
-		disease_exposure_wide,
-		file.path(OUTPUT_DIR, "disease_exposure_continuous_mc_baseline_wide.csv")
-	)
-	cat("  ✓ disease_exposure_continuous_mc_baseline_wide.csv\n")
-
 	## Sensitivity and rank stability
 	write_csv(
 		sensitivity_summary,
@@ -4939,12 +5941,13 @@ set.seed(1999)
 ## ═══════════════════════════════════════════════════════════════════════════════
 
 ## Join continuous exposure data to spatial object
-exposure_sf <- Georgia_adm2_sf |>
-    left_join(
-        disease_exposure |>
-            dplyr::select(GID_2, disease_group, disease_label, exposure_mean),
-        by = "GID_2"
-    )
+    exposure_sf <- muni_boundaries |>                    ## ← was Georgia_adm2_sf
+        left_join(
+            disease_exposure |>
+                dplyr::select(municipality_mapped,       ## ← was GID_2
+                              disease_group, disease_label, exposure_mean),
+            by = "municipality_mapped"                   ## ← was "GID_2"
+        )
 
 ## Compute shared scale limits across all disease groups
 exposure_range <- range(disease_exposure$exposure_mean, na.rm = TRUE)
@@ -4984,6 +5987,150 @@ ggplot(exposure_sf) +
         panel.spacing   = unit(0.8, "lines"),
         plot.margin     = ggplot2::margin(10, 10, 10, 10)
     )
+```
+
+```{r Save hazard maps}
+## ── Configuration ────────────────────────────────────────────────────────────
+FIGURE_DIR <- file.path(ONEDRIVE, "Paper2_Data/Figures/Disease_Hazard")
+dir.create(FIGURE_DIR, showWarnings = FALSE, recursive = TRUE)
+
+## Disease group ordering for panels
+DISEASE_GROUP_ORDER <- c(
+  "aedes_arbo", "wnv_complex", "malaria",
+  "tbe", "lyme", "sfg_rickettsia", "cchf", "tularemia"
+)
+
+
+## ── Load and prep spatial data ────────────────────────────────────────────────
+## Join all disease group indices to municipality boundaries in one step
+hazard_sf <- muni_boundaries |>
+  left_join(
+    group_index_summary_continuous |>
+      dplyr::select(municipality_mapped, disease_group, group_idx_mean) |>
+      left_join(disease_labels, by = "disease_group") |>
+      dplyr::mutate(
+        disease_label = factor(disease_label,
+          levels = disease_labels$disease_label[
+            match(DISEASE_GROUP_ORDER, disease_labels$disease_group)
+          ]
+        )
+      ),
+    by = "municipality_mapped"
+  )
+
+
+## ── Build a single disease group panel ───────────────────────────────────────
+plot_hazard_group <- function(dg_label, sf_data) {
+
+  plot_data <- sf_data |>
+    dplyr::filter(disease_label == dg_label)
+
+  ggplot() +
+    ## Grey base: full country including autonomous regions (visual context)
+    geom_sf(
+      data      = georgia_admin0,
+      fill      = "grey92",
+      colour    = NA
+    ) +
+    ## Hazard surface (autonomous regions blank — not in muni_boundaries)
+    geom_sf(
+      data      = plot_data,
+      mapping   = aes(fill = group_idx_mean),
+      colour    = "white",
+      linewidth = 0.15
+    ) +
+    ## Country border
+    geom_sf(
+      data      = georgia_admin0,
+      fill      = NA,
+      colour    = "grey40",
+      linewidth = 0.3
+    ) +
+    scale_fill_viridis_c(
+      option   = "viridis",
+      name     = "Hazard\nIndex",
+      limits   = c(0, 10),
+      breaks   = c(0, 5, 10),
+      labels   = c("0", "5", "10"),
+      na.value = "grey85",
+      guide    = guide_colorbar(
+        barwidth  = 0.4,
+        barheight = 3,
+        ticks     = FALSE
+      )
+    ) +
+    labs(title = dg_label) +
+    coord_sf(expand = FALSE) +
+    theme_void(base_size = 9) +
+    theme(
+      plot.title      = element_text(
+        size   = 8,
+        hjust  = 0.5,
+        face   = "bold",
+        margin = ggplot2::margin(b = 2)
+      ),
+      legend.position = "right",
+      legend.title    = element_text(size = 7),
+      legend.text     = element_text(size = 6),
+      plot.margin     = ggplot2::margin(4, 4, 4, 4)
+    )
+}
+
+
+## ── Individual disease group maps ─────────────────────────────────────────────
+purrr::walk(unique(na.omit(hazard_sf$disease_label)), function(dg_label) {
+
+  p        <- plot_hazard_group(dg_label, hazard_sf)
+  dg_clean <- gsub("[^a-zA-Z0-9]", "_", dg_label)
+
+  ggsave(
+    filename = file.path(FIGURE_DIR, paste0(dg_clean, "_hazard.svg")),
+    plot     = p,
+    width    = 4,
+    height   = 2.5,
+    dpi      = 900
+  )
+
+  cat("  ✓", dg_label, "\n")
+})
+
+
+## ── Composite panel: all 8 disease groups ────────────────────────────────────
+# all_hazard_plots <- purrr::map(
+#   levels(hazard_sf$disease_label),
+#   function(dg_label) {
+#     plot_hazard_group(dg_label, hazard_sf) +
+#       theme(legend.position = "none")
+#   }
+# )
+# 
+# hazard_panel <- patchwork::wrap_plots(
+#   purrr::compact(all_hazard_plots),
+#   ncol = 2
+# ) +
+#   patchwork::plot_layout(guides = "collect") &
+#   theme(legend.position = "bottom")
+# 
+# hazard_panel <- hazard_panel +
+#   patchwork::plot_annotation(
+#     title    = "Vector-borne Disease Hazard Indices — Baseline (Continuous)",
+#     subtitle = "INFORM-style group hazard index (0–10 scale); autonomous regions excluded",
+#     theme    = theme(
+#       plot.title    = element_text(face = "bold", size = 13),
+#       plot.subtitle = element_text(size = 9, colour = "grey40")
+#     )
+#   )
+# 
+# ggsave(
+#   filename = file.path(FIGURE_DIR, "disease_hazard_panel.png"),
+#   plot     = hazard_panel,
+#   width    = 10,
+#   height   = 18,
+#   dpi      = 900
+# )
+# 
+# cat("  ✓ Disease hazard panel saved\n")
+# cat("\nAll figures saved to:", FIGURE_DIR, "\n")
 ```
 
 ```{r Load in Georgia Vulnerability Data}
@@ -5805,323 +6952,181 @@ ggplot(exposure_sf) +
 ```
 
 ```{r Mapping SVI}
-# LOAD GEOJSON AND MAP TO SVI DATA
+## ═══════════════════════════════════════════════════════════════════════════════
+## JOIN SVI DATA TO CANONICAL BOUNDARIES
+## ═══════════════════════════════════════════════════════════════════════════════
 
-  # Load GeoJSON boundaries
-    zip_path <- "C:/Users/ianpsheasmith/Documents/GitHub/GVecVuln/data/geo_admin_boundaries.geojson.zip"
-    temp_dir <- tempdir()
-    unzip(zip_path, exdir = temp_dir, overwrite = TRUE)
-
-  # Load admin0 (country boundary - includes full extent with occupied territories)
-    georgia_admin0 <- st_read(file.path(temp_dir, "geo_admin0.geojson"))
-
-  # Load admin2 level (regular municipalities)
-    georgia_admin2 <- st_read(file.path(temp_dir, "geo_admin2.geojson"))
-
-  # Load admin1 level (for Tbilisi)
-    georgia_admin1 <- st_read(file.path(temp_dir, "geo_admin1.geojson"))
-  
-  # Extract Tbilisi from admin1 level
-    tbilisi_geom <- georgia_admin1 |>
-        filter(str_detect(tolower(adm1_name), "tbilisi")) |>
-        mutate(
-            adm2_name = "Tbilisi",
-            municipality_mapped = "tbilisi"  # ← Changed to lowercase!
-        ) |>
-        dplyr::select(adm2_name, adm1_name, municipality_mapped, geometry)
-
-# CREATE NAME MAPPING DICTIONARY FOR ADMIN2
-  name_mapping <- c(
-      # ============================================
-      # City administrative units → parent municipality
-      # ============================================
-      "Akhaltsikhe City" = "axalcixe",
-      "Akhaltsikhe"      = "axalcixe",
-      
-      "Ambrolauri City"  = "ambrolauri",
-      "Ambrolauri"       = "ambrolauri",
-      
-      "Gori City"        = "gori",
-      "Gori"             = "gori",
-      
-      "Mtskheta City"    = "mcxeta",
-      "Mtskheta"         = "mcxeta",
-      
-      "Ozurgeti City"    = "ozurgeti",
-      "Ozurgeti"         = "ozurgeti",
-      
-      "Telavi City"      = "telavi",
-      "Telavi"           = "telavi",
-      
-      "Zugdidi City"     = "zugdidi",
-      "Zugdidi"          = "zugdidi",
-      
-      # ============================================
-      # Standalone cities
-      # ============================================
-      "Batumi"  = "batumi",
-      "Kutaisi" = "kutaisi",
-      "Poti"    = "poti",
-      "Rustavi" = "rustavi",
-      "Tbilisi" = "tbilisi",  # Case sensitivity fix!
-      
-      # ============================================
-      # Transliteration: kh → x
-      # ============================================
-      "Akhmeta"      = "axmeta",
-      "Khashuri"     = "xashuri",
-      "Kharagauli"   = "xaragauli",
-      "Khobi"        = "xobi",
-      "Khulo"        = "xulo",
-      "Khelvachauri" = "xelvachauri",
-      "Khoni"        = "khoni",
-      
-      # ============================================
-      # Transliteration: ts/w → w/y variations
-      # ============================================
-      "Dedoplistskaro" = "dedofliswyaro",
-      "Kvareli"        = "yvareli",
-      "Tetritskaro"    = "tetriwyaro",
-      "Tskaltubo"      = "wyaltubo",
-      "Tsageri"        = "cageri",
-      "Tsalenjikha"    = "walenjixa",
-      "Tsalka"         = "walka",
-      "Chkhorotsku"    = "chxorowyu",
-      
-      # ============================================
-      # Spelling/transliteration variations
-      # ============================================
-      "Baghdati"     = "bagdadi",    # ← ADD THIS
-      "Bagdati"      = "bagdadi",    # Keep this too (just in case)
-      "Kareli"       = "qareli",     # ← ADD THIS
-      "Qareli"       = "qareli",     # Keep this too
-      "Sighnaghi"    = "signagi",    # ← ADD THIS
-      "Signagi"      = "signagi",    # Keep this too
-      "Ninotsminda"  = "ninowminda",
-      "Tkibuli"      = "tyibuli",
-      "Zestaponi"    = "zestafoni",
-      "Kazbegi"      = "yazbegi",
-      
-      # ============================================
-      # Standard municipalities (should match as-is but included for completeness)
-      # ============================================
-      "Abasha"       = "abasha",
-      "Adigeni"      = "adigeni",
-      "Aspindza"     = "aspindza",
-      "Akhalkalaki"  = "axalqalaqi",
-      "Bolnisi"      = "bolnisi",
-      "Borjomi"      = "borjomi",
-      "Chiatura"     = "chiatura",
-      "Chokhatauri"  = "choxatauri",
-      "Dmanisi"      = "dmanisi",
-      "Dusheti"      = "dusheti",
-      "Gardabani"    = "gardabani",
-      "Gurjaani"     = "gurjaani",
-      "Kaspi"        = "kaspi",
-      "Lagodekhi"    = "lagodexi",
-      "Lanchkhuti"   = "lanchxuti",
-      "Lentekhi"     = "lentexi",
-      "Marneuli"     = "marneuli",
-      "Martvili"     = "martvili",
-      "Mestia"       = "mestia",
-      "Oni"          = "oni",
-      "Keda"         = "qeda",
-      "Kobuleti"     = "qobuleti",
-      "Sachkhere"    = "sachxere",
-      "Sagarejo"     = "sagarejo",
-      "Samtredia"    = "samtredia",
-      "Senaki"       = "senaki",
-      "Shuakhevi"    = "shuaxevi",
-      "Terjola"      = "terjola",
-      "Tianeti"      = "tianeti",
-      "Vani"         = "vani"
-  )
-
-  # Apply mapping to admin2 boundaries
-    georgia_admin2_mapped <- georgia_admin2 |>
-        mutate(
-            municipality_mapped = case_when(
-                adm2_name %in% names(name_mapping) ~ name_mapping[adm2_name],
-                TRUE ~ adm2_name
-            )
-        ) |>
-        dplyr::select(adm2_name, adm1_name, municipality_mapped, geometry)
-  
-  # Combine admin2 with Tbilisi from admin1
-    georgia_boundaries_combined <- bind_rows(
-        georgia_admin2_mapped,
-        tbilisi_geom
-    )
-
-  # JOIN SVI DATA TO COMBINED BOUNDARIES
-    georgia_map_new <- georgia_boundaries_combined |>
+  ## Join SVI directly to the dissolved GeoJSON boundaries
+    georgia_map_new <- muni_boundaries |>
         left_join(
             georgia_svi,
             by = c("municipality_mapped" = "municipality")
         )
 
-  # VERIFY JOIN QUALITY
+  ## ── Verify join quality ──────────────────────────────────────────────────
     cat("Total features:", nrow(georgia_map_new), "\n")
-    cat("Features with SVI data:", sum(!is.na(georgia_map_new$svi_composite)), "\n")
-    cat("Features without SVI data:", sum(is.na(georgia_map_new$svi_composite)), "\n\n")
+    cat("Features with SVI data:",
+        sum(!is.na(georgia_map_new$svi_composite)), "\n")
+    cat("Features without SVI (unmatched):",
+        sum(is.na(georgia_map_new$svi_composite)), "\n\n")
 
-  # Check for SVI municipalities not in map (should be none)
     svi_not_mapped <- georgia_svi |>
-        filter(!municipality %in% georgia_map_new$municipality_mapped) |>
+        dplyr::filter(
+            !municipality %in% georgia_map_new$municipality_mapped
+        ) |>
         dplyr::select(municipality, region, svi_composite)
-    
-    if(nrow(svi_not_mapped) > 0) {
-        cat("=== SVI MUNICIPALITIES NOT IN GEOJSON ===\n")
+
+    if (nrow(svi_not_mapped) > 0) {
+        cat("=== SVI MUNICIPALITIES NOT MATCHED ===\n")
         print(svi_not_mapped)
-        cat("\n")
     } else {
-        cat("✓ ALL 64 SVI MUNICIPALITIES SUCCESSFULLY MAPPED\n\n")
+        cat("✓ ALL SVI MUNICIPALITIES SUCCESSFULLY MAPPED\n\n")
     }
 
-  # CREATE CHOROPLETH MAP WITH BASE LAYER
+  ## ── Choropleth ───────────────────────────────────────────────────────────
     georgia_svi_map <- ggplot() +
-        # Base layer: Full country boundary (shows occupied territories as grey)
-          geom_sf(
-              data = georgia_admin0,
-              fill = "grey90",
-              color = NA,
-              size = 0.05
-          ) +
-        # Data layer: Admin2 municipalities with SVI data
-          geom_sf(
-              data = georgia_map_new,
-              aes(fill = svi_composite),
-              color = NA,
-              size = 0.05
-          ) +
-          scale_fill_viridis_c(
-              name = "Social Vulnerability\nIndex",
-              option = "viridis",
-              na.value = "transparent",
-              direction = 1
-          ) +
-          theme_minimal() +
-          theme(
-              legend.position = "none",  # Remove legend
-              panel.grid = element_blank(),
-              axis.text = element_text(size = 8),  # Show lat/lon coordinates
-              axis.ticks = element_line(color = "grey50", size = 0.2),  # Add subtle tick marks
-              axis.title = element_blank()  # Keep axis titles blank
-          )
+        geom_sf(
+            data  = georgia_admin0,
+            fill  = "grey90",
+            color = NA,
+            size  = 0.05
+        ) +
+        geom_sf(
+            data = georgia_map_new,
+            aes(fill = svi_composite),
+            color = NA,
+            size  = 0.05
+        ) +
+        scale_fill_viridis_c(
+            name      = "Social Vulnerability\nIndex",
+            option    = "viridis",
+            na.value  = "transparent",
+            direction = 1
+        ) +
+        theme_minimal() +
+        theme(
+            legend.position = "none",
+            panel.grid      = element_blank(),
+            axis.text       = element_text(size = 8),
+            axis.ticks      = element_line(color = "grey50", size = 0.2),
+            axis.title      = element_blank()
+        )
 
-  # Display the plot
     print(georgia_svi_map)
 
-# SUMMARY STATISTICS
-  cat("=== SVI SUMMARY STATISTICS ===\n")
-  cat("Municipalities mapped:", sum(!is.na(georgia_map_new$svi_composite)), "/ 71\n")
-  cat("  (70 admin2 units + Tbilisi from admin1)\n")
-  cat("Mean SVI:", round(mean(georgia_map_new$svi_composite, na.rm = TRUE), 3), "\n")
-  cat("SD:", round(sd(georgia_map_new$svi_composite, na.rm = TRUE), 3), "\n")
-  cat("Range:", 
-      round(min(georgia_map_new$svi_composite, na.rm = TRUE), 3), "to",
-      round(max(georgia_map_new$svi_composite, na.rm = TRUE), 3), "\n\n")
-  
-  cat("=== MOST VULNERABLE (Top 5) ===\n")
-  georgia_map_new |>
-      st_drop_geometry() |>
-      filter(!is.na(svi_composite)) |>
-      arrange(desc(svi_composite)) |>
-      dplyr::select(adm2_name, adm1_name, svi_composite) |>
-      head(5) |>
-      print()
-  
-  cat("\n=== LEAST VULNERABLE (Top 5) ===\n")
-  georgia_map_new |>
-      st_drop_geometry() |>
-      filter(!is.na(svi_composite)) |>
-      arrange(svi_composite) |>
-      dplyr::select(adm2_name, adm1_name, svi_composite) |>
-      head(5) |>
-      print()
+  ## ── Summary statistics (same as original, replacing adm2_name w/ municipality_mapped) ──
+    cat("=== SVI SUMMARY STATISTICS ===\n")
+    cat("Municipalities mapped:",
+        sum(!is.na(georgia_map_new$svi_composite)), "/",
+        nrow(georgia_map_new), "\n")
+    cat("Mean SVI:",
+        round(mean(georgia_map_new$svi_composite, na.rm = TRUE), 3), "\n")
+    cat("SD:",
+        round(sd(georgia_map_new$svi_composite, na.rm = TRUE), 3), "\n")
+    cat("Range:",
+        round(min(georgia_map_new$svi_composite, na.rm = TRUE), 3), "to",
+        round(max(georgia_map_new$svi_composite, na.rm = TRUE), 3), "\n\n")
 
+    cat("=== MOST VULNERABLE (Top 5) ===\n")
+    georgia_map_new |>
+        sf::st_drop_geometry() |>
+        dplyr::filter(!is.na(svi_composite)) |>
+        dplyr::arrange(desc(svi_composite)) |>
+        dplyr::select(municipality_mapped, svi_composite) |>
+        head(5) |>
+        print()
 
+    cat("\n=== LEAST VULNERABLE (Top 5) ===\n")
+    georgia_map_new |>
+        sf::st_drop_geometry() |>
+        dplyr::filter(!is.na(svi_composite)) |>
+        dplyr::arrange(svi_composite) |>
+        dplyr::select(municipality_mapped, svi_composite) |>
+        head(5) |>
+        print()
 ```
 
 ```{r SVI Leaflet Map}
-# ==============================================================================
-# CREATE INTERACTIVE LEAFLET MAP WITH SVI DATA
-# ==============================================================================
 
-library(leaflet)
-
-# Create color palette for SVI values (excluding NAs)
-pal <- colorNumeric(
-    palette = "viridis",
-    domain = georgia_map_new$svi_composite,
-    na.color = "transparent"
-)
-
-# Prepare popup text with formatted SVI variables
-# Uses the same field names as the main mapping code
-georgia_map_interactive <- georgia_map_new |>
-    mutate(
-        popup_text = paste0(
-            "<strong>", adm2_name, "</strong><br/>",
-            "<em>Region: ", adm1_name, "</em><br/>",
-            "<hr style='margin: 5px 0;'/>",
-            "<strong>SVI Composite:</strong> ", round(svi_composite, 2), "<br/>",
-            "<strong>Population:</strong> ", format(population_total, big.mark = ","), "<br/>",
-            "<strong>Healthcare Staff per 1,000:</strong> ", round(healthcare_staff_per_1000, 2), "<br/>",
-            "<strong>Education Graduates per 1,000:</strong> ", round(education_graduates_per_1000, 2), "<br/>",
-            "<strong>Child Dependency Ratio:</strong> ", round(child_dependency_ratio, 1), "<br/>",
-            "<strong>Old Age Dependency Ratio:</strong> ", round(old_age_dependency_ratio, 1), "<br/>",
-            "<strong>Average Monthly Wage:</strong> ", round(average_monthly_wage, 2), "<br/>",
-            "<strong>Disability Rate per 1,000:</strong> ", round(disability_rate_per_1000, 2)
+  # Capitalise municipality and region names using title case
+    georgia_map_display <- georgia_map_new |>
+        mutate(
+            municipality_mapped = stringr::str_to_title(municipality_mapped),
+            region              = stringr::str_to_title(region)
         )
+
+  # Create color palette for SVI values (excluding NAs)
+    pal <- colorNumeric(
+        palette = "viridis",
+        domain = georgia_map_display$svi_composite,
+        na.color = "transparent"
     )
 
-# Build interactive leaflet map
-svi_interactive_map <- leaflet(georgia_map_interactive) |>
-    # Add base map tiles
-    addProviderTiles(providers$CartoDB.Positron) |>
-    # Add base layer for full country extent (including occupied territories)
-    addPolygons(
-        data = georgia_admin0,
-        fillColor = "grey90",
-        fillOpacity = 0.3,
-        color = "grey70",
-        weight = 1.5,
-        popup = "Area outside government control"
-    ) |>
-    # Add data layer with SVI values
-    addPolygons(
-        fillColor = ~ifelse(is.na(svi_composite), "grey", pal(svi_composite)),
-        fillOpacity = 0.7,
-        color = "white",
-        weight = 1,
-        popup = ~popup_text,
-        highlightOptions = highlightOptions(
-            weight = 2,
-            color = "#666",
-            fillOpacity = 0.9,
-            bringToFront = TRUE
+  # Prepare popup text with formatted SVI variables
+    georgia_map_interactive <- georgia_map_display |>
+        mutate(
+            popup_text = paste0(
+                "<strong>", municipality_mapped, "</strong><br/>",
+                "<em>Region: ", region, "</em><br/>",
+                "<hr style='margin: 5px 0;'/>",
+                "<strong>SVI Composite:</strong> ", round(svi_composite, 2), "<br/>",
+                "<strong>Population:</strong> ", format(population_total, big.mark = ","), "<br/>",
+                "<strong>Healthcare Staff per 1,000:</strong> ", round(healthcare_staff_per_1000, 2), "<br/>",
+                "<strong>Education Graduates per 1,000:</strong> ", round(education_graduates_per_1000, 2), "<br/>",
+                "<strong>Child Dependency Ratio:</strong> ", round(child_dependency_ratio, 1), "<br/>",
+                "<strong>Old Age Dependency Ratio:</strong> ", round(old_age_dependency_ratio, 1), "<br/>",
+                "<strong>Average Monthly Wage:</strong> ", round(average_monthly_wage, 2), "<br/>",
+                "<strong>Disability Rate per 1,000:</strong> ", round(disability_rate_per_1000, 2)
+            )
         )
-    ) |>
-    # Add legend for SVI values
-    addLegend(
-        position = "bottomright",
-        pal = pal,
-        values = ~svi_composite,
-        title = "Social Vulnerability<br/>Index",
-        opacity = 0.7,
-        na.label = ""
-    ) |>
-    # Add separate legend for areas without data
-    addLegend(
-        position = "bottomright",
-        colors = "grey",
-        labels = "No SVI data",
-        opacity = 0.7
-    )
 
-# Display the interactive map
-svi_interactive_map
+  # Build interactive leaflet map
+    svi_interactive_map <- leaflet(georgia_map_interactive) |>
+        addProviderTiles(providers$CartoDB.Positron) |>
+          addPolygons(
+              data = georgia_admin0,
+              fillColor = "grey90",
+              fillOpacity = 0.3,
+              color = "grey70",
+              weight = 1.5,
+              popup = "Area outside government control"
+          ) |>
+          addPolygons(
+              fillColor = ~ifelse(is.na(svi_composite), "grey", pal(svi_composite)),
+              fillOpacity = 0.7,
+              color = "white",
+              weight = 1,
+              popup = ~popup_text,
+              highlightOptions = highlightOptions(
+                  weight = 2,
+                  color = "#666",
+                  fillOpacity = 0.9,
+                  bringToFront = TRUE
+              )
+          ) |>
+          addLegend(
+              position = "bottomright",
+              pal = pal,
+              values = ~svi_composite,
+              title = "Social Vulnerability<br/>Index",
+              opacity = 0.7,
+              na.label = ""
+          ) |>
+          addLegend(
+              position = "bottomright",
+              colors = "grey",
+              labels = "No SVI data",
+              opacity = 0.7
+          )
+  
+  # # Display the interactive map
+    svi_interactive_map
+      # Save the interactive map
+        htmlwidgets::saveWidget(
+        widget = svi_interactive_map,
+        file   = "C:/Users/ianpsheasmith/Documents/GitHub/GeorgiaVectors/SVI_Map.html",
+        selfcontained = TRUE
+      )
 ```
 
 ```{r SVI LISA}
@@ -6163,7 +7168,7 @@ svi_interactive_map
         "Low-Low"         = "#2c7bb6",   # Blue:   Low SVI surrounded by low SVI
         "High-Low"        = "#fdae61",   # Orange: High SVI surrounded by low SVI (outlier)
         "Low-High"        = "#abd9e9",   # Lt Blue: Low SVI surrounded by high SVI (outlier)
-        "Undefined"       = "white"
+        "Undefined"       = "#484848"
     )
 
   # MAP: LOCAL MORAN'S I CLUSTER MAP
@@ -6198,7 +7203,7 @@ svi_interactive_map
           ) +
           labs(
               title    = "Local Moran's I: Spatial Clustering of Social Vulnerability",
-              subtitle = "Georgia municipalities | Queen contiguity weights | 999 permutations"
+              subtitle = "Georgia municipalities | Queen contiguity weights | 9999 permutations"
           )
 
     print(georgia_lisa_map)
@@ -6212,8 +7217,8 @@ svi_interactive_map
             !lisa_label %in% c("Not significant", "Undefined")
         ) |>
         dplyr::select(
-            Municipality  = adm2_name,
-            Region        = adm1_name,
+            Municipality  = municipality_mapped,
+            Region        = region,
             SVI           = svi_composite,
             `Moran's Ii`  = lisa_ii,
             `p-value`     = lisa_pvalue,
@@ -6228,92 +7233,33 @@ svi_interactive_map
 ```
 
 ```{r INFORM Risk Index — maxSSS (Conservative)}
-## ═══════════════════════════════════════════════════════════════════════════════
-## INFORM-STYLE RISK INDEX — maxSSS (CONSERVATIVE) APPROACH
-##
-## Constructs the final municipality-level risk index by combining:
-##   1. Disease group exposure indices (from the maxSSS MC simulation)
-##   2. Population-weighted absolute exposure
-##   3. Social vulnerability index
-##
-## Following the INFORM methodology:
-##   - Relative and absolute exposure are min-max normalised to 0–10
-##   - Disease group indices are averaged from relative + absolute
-##   - Overall hazard = epsilon-adjusted geometric mean across disease groups
-##   - Final risk = epsilon-adjusted geometric mean of hazard × normalised SVI
-##   - Full Monte Carlo uncertainty propagation (1,000 iterations)
-##
-## PLACEMENT: This chunk must run AFTER the 'Vector Groupings Construction
-##            w/ Monte Carlo for maxSSS' chunk and BEFORE the continuous
-##            version overwrites mc_results.
-## ═══════════════════════════════════════════════════════════════════════════════
-
 
 ## ── Preserve MC results under a unique name ──────────────────────────────────
-## Prevents data loss if the continuous MC chunk runs later in the same session
-	mc_results_maxsss    <- mc_results
-	disease_groups_saved <- disease_groups
+  ## Prevents data loss if the continuous MC chunk runs later in the same session
+  	mc_results_maxsss    <- mc_results
+  	disease_groups_saved <- disease_groups
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
-# ─────────────────────────────────────────────────────────────────────────────
 
-	EPSILON   <- 0.1   ## Shift constant on 0–10 scale; prevents geometric mean collapse
-	SCALE_MAX <- 10    ## INFORM standard upper bound
+	EPSILON   <- 0.01   ## Shift constant on 0–1 scale; prevents geometric mean collapse
+	SCALE_MAX <- 1    ## INFORM standard upper bound
 
+# Run lookups to adjoin svi and population	
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILD CROSSWALK: GADM (SDM) ↔ SVI (VULNERABILITY)
-# ─────────────────────────────────────────────────────────────────────────────
-## The SDM data uses GADM NAME_2 identifiers while the SVI uses Georgian
-## census municipality slugs. A spatial centroid join through the dissolved
-## geojson boundaries bridges the two naming systems.
+    svi_lookup <- set_names(
+        georgia_map_new$svi_composite,
+        georgia_map_new$municipality_mapped
+    )
+    pop_lookup <- set_names(
+        georgia_map_new$population_total,
+        georgia_map_new$municipality_mapped
+    )
 
-	## Dissolve city/municipality pairs in geojson to one polygon per SVI unit
-	svi_dissolved <- georgia_map_new |>
-		dplyr::filter(!is.na(municipality_mapped), !is.na(svi_composite)) |>
-		group_by(municipality_mapped) |>
-		summarise(
-			svi_composite    = first(svi_composite),
-			population_total = first(population_total),
-			geometry         = sf::st_union(geometry),
-			.groups          = "drop"
-		)
-
-	## Match GADM centroids into the dissolved SVI polygons
-	crosswalk <- sf::st_join(
-		Georgia_adm2_sf |>
-			sf::st_centroid() |>
-			dplyr::select(NAME_2, GID_2),
-		svi_dissolved,
-		join = sf::st_within,
-		left = TRUE
-	) |>
-		sf::st_drop_geometry() |>
-		distinct(NAME_2, .keep_all = TRUE)
-
-	cat("══════════════════════════════════════════════════════════════\n")
-	cat("  INFORM RISK INDEX — maxSSS (Conservative)\n")
-	cat("══════════════════════════════════════════════════════════════\n\n")
-	cat("  Crosswalk matched:", sum(!is.na(crosswalk$svi_composite)), "/",
-	    nrow(crosswalk), "municipalities to SVI data\n")
-	cat("  Disease groups:   ", length(disease_groups_saved), "\n")
-	cat("  MC iterations:    ", N_ITERATIONS, "\n")
-	cat("  Epsilon:          ", EPSILON, "\n\n")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ALIGN POPULATION AND SVI VECTORS TO MC MATRIX ROW ORDER
-# ─────────────────────────────────────────────────────────────────────────────
-
-	muni_order     <- rownames(mc_results_maxsss[[1]])
-	pop_lookup     <- set_names(crosswalk$population_total, crosswalk$NAME_2)
-	svi_lookup     <- set_names(crosswalk$svi_composite, crosswalk$NAME_2)
-
-	population_vec <- pop_lookup[muni_order]
-	svi_raw        <- svi_lookup[muni_order]
-	n_muni         <- length(muni_order)
+    muni_order     <- rownames(mc_results_maxsss[[1]])
+    population_vec <- pop_lookup[muni_order]
+    svi_raw        <- svi_lookup[muni_order]
+    n_muni         <- length(muni_order)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6442,8 +7388,7 @@ svi_interactive_map
 
 	## Overall hazard summary
 	hazard_summary <- tibble(
-		NAME_2      = muni_order,
-		GID_2       = crosswalk$GID_2[match(muni_order, crosswalk$NAME_2)],
+    municipality_mapped = muni_order,
 		hazard_mean = rowMeans(hazard_mat, na.rm = TRUE),
 		hazard_sd   = apply(hazard_mat, 1, sd, na.rm = TRUE),
 		hazard_q025 = apply(hazard_mat, 1, quantile, probs = 0.025, na.rm = TRUE),
@@ -6452,8 +7397,7 @@ svi_interactive_map
 
 	## Overall risk summary
 	risk_summary_maxsss <- tibble(
-		NAME_2    = muni_order,
-		GID_2     = crosswalk$GID_2[match(muni_order, crosswalk$NAME_2)],
+    municipality_mapped = muni_order,
 		svi_raw   = svi_raw,
 		svi_norm  = svi_norm,
 		risk_mean = rowMeans(risk_mat, na.rm = TRUE),
@@ -6462,8 +7406,8 @@ svi_interactive_map
 		risk_q975 = apply(risk_mat, 1, quantile, probs = 0.975, na.rm = TRUE)
 	) |>
 		left_join(
-			hazard_summary |> dplyr::select(NAME_2, hazard_mean, hazard_sd),
-			by = "NAME_2"
+			hazard_summary |> dplyr::select(municipality_mapped, hazard_mean, hazard_sd),
+			by = "municipality_mapped"
 		)
 
 	## Per-group disease hazard indices (mean across MC iterations)
@@ -6471,8 +7415,7 @@ svi_interactive_map
 		mat <- group_index_mats[[dg]]
 		tibble(
 			disease_group   = dg,
-			NAME_2          = muni_order,
-			GID_2           = crosswalk$GID_2[match(muni_order, crosswalk$NAME_2)],
+      municipality_mapped = muni_order,
 			group_idx_mean  = rowMeans(mat, na.rm = TRUE),
 			group_idx_sd    = apply(mat, 1, sd, na.rm = TRUE),
 			group_idx_q025  = apply(mat, 1, quantile, probs = 0.025, na.rm = TRUE),
@@ -6501,7 +7444,7 @@ svi_interactive_map
 		dplyr::filter(!is.na(risk_mean)) |>
 		arrange(desc(risk_mean)) |>
 		head(5) |>
-		mutate(label = paste0("    ", NAME_2, ": ",
+		mutate(label = paste0("    ", municipality_mapped, ": ",
 		                      round(risk_mean, 2), " ± ", round(risk_sd, 2),
 		                      "  [hazard: ", round(hazard_mean, 2),
 		                      ", SVI: ", round(svi_norm, 2), "]")) |>
@@ -6513,7 +7456,7 @@ svi_interactive_map
 		dplyr::filter(!is.na(risk_mean)) |>
 		arrange(risk_mean) |>
 		head(5) |>
-		mutate(label = paste0("    ", NAME_2, ": ",
+		mutate(label = paste0("    ", municipality_mapped, ": ",
 		                      round(risk_mean, 2), " ± ", round(risk_sd, 2),
 		                      "  [hazard: ", round(hazard_mean, 2),
 		                      ", SVI: ", round(svi_norm, 2), "]")) |>
@@ -6584,59 +7527,28 @@ svi_interactive_map
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-	EPSILON   <- 0.1
-	SCALE_MAX <- 10
+	EPSILON   <- 0.01
+	SCALE_MAX <- 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BUILD CROSSWALK: GADM (SDM) ↔ SVI (VULNERABILITY)
-# ─────────────────────────────────────────────────────────────────────────────
-## Same spatial matching logic as the maxSSS chunk. If the crosswalk object
-## already exists in the environment from the maxSSS chunk, this section
-## simply refreshes it to ensure consistency.
-
-	svi_dissolved <- georgia_map_new |>
-		dplyr::filter(!is.na(municipality_mapped), !is.na(svi_composite)) |>
-		group_by(municipality_mapped) |>
-		summarise(
-			svi_composite    = first(svi_composite),
-			population_total = first(population_total),
-			geometry         = sf::st_union(geometry),
-			.groups          = "drop"
-		)
-
-	crosswalk <- sf::st_join(
-		Georgia_adm2_sf |>
-			sf::st_centroid() |>
-			dplyr::select(NAME_2, GID_2),
-		svi_dissolved,
-		join = sf::st_within,
-		left = TRUE
-	) |>
-		sf::st_drop_geometry() |>
-		distinct(NAME_2, .keep_all = TRUE)
-
-	cat("══════════════════════════════════════════════════════════════\n")
-	cat("  INFORM RISK INDEX — Continuous (Liberal)\n")
-	cat("══════════════════════════════════════════════════════════════\n\n")
-	cat("  Crosswalk matched:", sum(!is.na(crosswalk$svi_composite)), "/",
-	    nrow(crosswalk), "municipalities to SVI data\n")
-	cat("  Disease groups:   ", length(disease_groups_saved), "\n")
-	cat("  MC iterations:    ", N_ITERATIONS, "\n")
-	cat("  Epsilon:          ", EPSILON, "\n\n")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ALIGN POPULATION AND SVI VECTORS TO MC MATRIX ROW ORDER
+# ## Both hazard (MC matrices) and SVI (georgia_map_new) are now keyed
+## on municipality_mapped
 # ─────────────────────────────────────────────────────────────────────────────
 
-	muni_order     <- rownames(mc_results_continuous[[1]])
-	pop_lookup     <- set_names(crosswalk$population_total, crosswalk$NAME_2)
-	svi_lookup     <- set_names(crosswalk$svi_composite, crosswalk$NAME_2)
+    svi_lookup <- set_names(
+        georgia_map_new$svi_composite,
+        georgia_map_new$municipality_mapped
+    )
+    pop_lookup <- set_names(
+        georgia_map_new$population_total,
+        georgia_map_new$municipality_mapped
+    )
 
-	population_vec <- pop_lookup[muni_order]
-	svi_raw        <- svi_lookup[muni_order]
-	n_muni         <- length(muni_order)
+    muni_order     <- rownames(mc_results_maxsss[[1]])
+    population_vec <- pop_lookup[muni_order]
+    svi_raw        <- svi_lookup[muni_order]
+    n_muni         <- length(muni_order)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6743,8 +7655,7 @@ svi_interactive_map
 # ─────────────────────────────────────────────────────────────────────────────
 
 	hazard_summary_cont <- tibble(
-		NAME_2      = muni_order,
-		GID_2       = crosswalk$GID_2[match(muni_order, crosswalk$NAME_2)],
+    municipality_mapped = muni_order,
 		hazard_mean = rowMeans(hazard_mat, na.rm = TRUE),
 		hazard_sd   = apply(hazard_mat, 1, sd, na.rm = TRUE),
 		hazard_q025 = apply(hazard_mat, 1, quantile, probs = 0.025, na.rm = TRUE),
@@ -6752,8 +7663,7 @@ svi_interactive_map
 	)
 
 	risk_summary_continuous <- tibble(
-		NAME_2    = muni_order,
-		GID_2     = crosswalk$GID_2[match(muni_order, crosswalk$NAME_2)],
+		municipality_mapped = muni_order,
 		svi_raw   = svi_raw,
 		svi_norm  = svi_norm,
 		risk_mean = rowMeans(risk_mat, na.rm = TRUE),
@@ -6761,17 +7671,14 @@ svi_interactive_map
 		risk_q025 = apply(risk_mat, 1, quantile, probs = 0.025, na.rm = TRUE),
 		risk_q975 = apply(risk_mat, 1, quantile, probs = 0.975, na.rm = TRUE)
 	) |>
-		left_join(
-			hazard_summary_cont |> dplyr::select(NAME_2, hazard_mean, hazard_sd),
-			by = "NAME_2"
-		)
+		## Attach hazard estimates for diagnostic reporting
+		left_join(hazard_summary_cont, by = "municipality_mapped")
 
 	group_index_summary_continuous <- purrr::map_dfr(disease_groups_saved, function(dg) {
 		mat <- group_index_mats[[dg]]
 		tibble(
 			disease_group   = dg,
-			NAME_2          = muni_order,
-			GID_2           = crosswalk$GID_2[match(muni_order, crosswalk$NAME_2)],
+      municipality_mapped = muni_order,
 			group_idx_mean  = rowMeans(mat, na.rm = TRUE),
 			group_idx_sd    = apply(mat, 1, sd, na.rm = TRUE),
 			group_idx_q025  = apply(mat, 1, quantile, probs = 0.025, na.rm = TRUE),
@@ -6799,7 +7706,7 @@ svi_interactive_map
 		dplyr::filter(!is.na(risk_mean)) |>
 		arrange(desc(risk_mean)) |>
 		head(5) |>
-		mutate(label = paste0("    ", NAME_2, ": ",
+		mutate(label = paste0("    ", municipality_mapped, ": ",
 		                      round(risk_mean, 2), " ± ", round(risk_sd, 2),
 		                      "  [hazard: ", round(hazard_mean, 2),
 		                      ", SVI: ", round(svi_norm, 2), "]")) |>
@@ -6811,7 +7718,7 @@ svi_interactive_map
 		dplyr::filter(!is.na(risk_mean)) |>
 		arrange(risk_mean) |>
 		head(5) |>
-		mutate(label = paste0("    ", NAME_2, ": ",
+		mutate(label = paste0("    ", municipality_mapped, ": ",
 		                      round(risk_mean, 2), " ± ", round(risk_sd, 2),
 		                      "  [hazard: ", round(hazard_mean, 2),
 		                      ", SVI: ", round(svi_norm, 2), "]")) |>
@@ -6839,11 +7746,11 @@ svi_interactive_map
 	if (exists("risk_summary_maxsss")) {
 
 		comparison_df <- risk_summary_maxsss |>
-			dplyr::select(NAME_2, risk_maxsss = risk_mean) |>
+			dplyr::select(municipality_mapped, risk_maxsss = risk_mean) |>
 			left_join(
 				risk_summary_continuous |>
-					dplyr::select(NAME_2, risk_continuous = risk_mean),
-				by = "NAME_2"
+					dplyr::select(municipality_mapped, risk_continuous = risk_mean),
+				by = "municipality_mapped"
 			) |>
 			dplyr::filter(!is.na(risk_maxsss), !is.na(risk_continuous))
 
@@ -6872,7 +7779,7 @@ svi_interactive_map
 		cat("  Largest rank shifts (maxSSS rank − continuous rank):\n")
 		comparison_df |>
 			head(5) |>
-			mutate(label = paste0("    ", NAME_2,
+			mutate(label = paste0("    ", municipality_mapped,
 			                      ": maxSSS rank ", rank_maxsss,
 			                      " → continuous rank ", rank_continuous,
 			                      " (Δ ", rank_shift, ")")) |>
@@ -6916,508 +7823,306 @@ svi_interactive_map
 	cat("\nAll INFORM (continuous) outputs saved to:", OUTPUT_DIR, "\n")
 ```
 
-```{r}
+```{r INFORM Interactive Risk Map - Redesigned}
 ## ═══════════════════════════════════════════════════════════════════════════════
-## INTERACTIVE CHOROPLETH: maxSSS vs. CONTINUOUS RISK COMPARISON
-##
-## Builds a Leaflet choropleth with:
-##   - Top-left dropdown: disease group selector (Overall Risk + 8 groups)
-##   - Top-left toggle: maxSSS vs Continuous approach
-##   - Click popup: side-by-side comparison of both approaches, SVI, population
-##
-## DEPENDENCIES:
-##   risk_summary_maxsss, risk_summary_continuous,
-##   group_index_summary_maxsss, group_index_summary_continuous,
-##   Georgia_adm2_sf, crosswalk
+## INTERACTIVE LEAFLET MAP — INFORM RISK INDEX EXPLORER (matches SVI style)
 ## ═══════════════════════════════════════════════════════════════════════════════
 
-library(tidyverse)
-library(sf)
-library(leaflet)
-library(htmltools)
-library(htmlwidgets)
-library(jsonlite)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURATION
+# PREPARE SPATIAL DATA
 # ─────────────────────────────────────────────────────────────────────────────
 
-	SCALE_MAX   <- 10
-	OUTPUT_HTML <- file.path(OUTPUT_DIR, "inform_risk_comparison_interactive.html")
+## Per-group indices — pivot wide first so they exist before map_sf is built
+group_wide_cont <- group_index_summary_continuous |>
+    dplyr::select(
+        municipality_mapped, disease_group,
+        group_idx_mean, group_idx_q025, group_idx_q975
+    ) |>
+    tidyr::pivot_wider(
+        names_from  = disease_group,
+        values_from = c(group_idx_mean, group_idx_q025, group_idx_q975),
+        names_glue  = "cont_{.value}_{disease_group}"
+    )
 
+## Build map_sf in a single pipeline
+map_sf <- georgia_map_new |>
+    dplyr::select(
+        -dplyr::matches("^(cont|maxsss)_(risk|risksd|q025|q975|hazard|group_idx)")
+    ) |>
+    left_join(
+        risk_summary_continuous |>
+            dplyr::select(
+                municipality_mapped,
+                cont_risk    = risk_mean,
+                cont_risksd  = risk_sd,
+                cont_q025    = risk_q025,
+                cont_q975    = risk_q975,
+                cont_hazard  = hazard_mean
+            ),
+        by = "municipality_mapped"
+    ) |>
+    left_join(group_wide_cont, by = "municipality_mapped") |>
+    mutate(
+        municipality_mapped = stringr::str_to_title(municipality_mapped),
+        region              = stringr::str_to_title(region)
+    )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ASSEMBLE WIDE DATA FRAME FOR JSON EMBEDDING
-# ─────────────────────────────────────────────────────────────────────────────
-## Each municipality gets columns for every (approach × view) combination,
-## keyed as e.g. "maxsss_overall_mean", "continuous_lyme_borreliosis_q025", etc.
-
-	## Overall risk: pivot both approaches into wide columns
-	risk_wide <- risk_summary_maxsss |>
-		dplyr::select(NAME_2, GID_2, svi_raw, svi_norm,
-		              maxsss_overall_mean = risk_mean,
-		              maxsss_overall_sd   = risk_sd,
-		              maxsss_overall_q025 = risk_q025,
-		              maxsss_overall_q975 = risk_q975,
-		              maxsss_hazard_mean  = hazard_mean,
-		              maxsss_hazard_sd    = hazard_sd) |>
-		left_join(
-			risk_summary_continuous |>
-				dplyr::select(NAME_2,
-				              continuous_overall_mean = risk_mean,
-				              continuous_overall_sd   = risk_sd,
-				              continuous_overall_q025 = risk_q025,
-				              continuous_overall_q975 = risk_q975,
-				              continuous_hazard_mean  = hazard_mean,
-				              continuous_hazard_sd    = hazard_sd),
-			by = "NAME_2"
-		)
-
-	## Per-group indices: pivot each approach to wide columns
-	group_wide_maxsss <- group_index_summary_maxsss |>
-		dplyr::select(NAME_2, disease_group, group_idx_mean, group_idx_sd,
-		              group_idx_q025, group_idx_q975) |>
-		pivot_wider(
-			id_cols     = NAME_2,
-			names_from  = disease_group,
-			values_from = c(group_idx_mean, group_idx_sd, group_idx_q025, group_idx_q975),
-			names_glue  = "maxsss_{disease_group}_{.value}"
-		) |>
-		rename_with(~ str_replace_all(.x, "group_idx_", ""), -NAME_2)
-
-	group_wide_continuous <- group_index_summary_continuous |>
-		dplyr::select(NAME_2, disease_group, group_idx_mean, group_idx_sd,
-		              group_idx_q025, group_idx_q975) |>
-		pivot_wider(
-			id_cols     = NAME_2,
-			names_from  = disease_group,
-			values_from = c(group_idx_mean, group_idx_sd, group_idx_q025, group_idx_q975),
-			names_glue  = "continuous_{disease_group}_{.value}"
-		) |>
-		rename_with(~ str_replace_all(.x, "group_idx_", ""), -NAME_2)
-
-	## Combine everything, join population from crosswalk
-	map_data <- risk_wide |>
-		left_join(group_wide_maxsss,    by = "NAME_2") |>
-		left_join(group_wide_continuous, by = "NAME_2") |>
-		left_join(
-			crosswalk |> dplyr::select(NAME_2, population_total),
-			by = "NAME_2"
-		)
-
-	cat("  Map data assembled:", nrow(map_data), "municipalities\n")
-	cat("  Columns:", ncol(map_data), "\n\n")
-
+## Disease group keys and labels
+dg_keys   <- unique(group_index_summary_continuous$disease_group)
+dg_labels <- disease_labels$disease_label[match(dg_keys, disease_labels$disease_group)]
+dg_labels <- dplyr::if_else(is.na(dg_labels), dg_keys, dg_labels)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JOIN TO SPATIAL BOUNDARIES
+# HELPER: build popup — overall risk/hazard + all group indices in one table
 # ─────────────────────────────────────────────────────────────────────────────
 
-	map_sf <- Georgia_adm2_sf |>
-		left_join(map_data, by = "NAME_2") |>
-		sf::st_transform(4326)
+make_popup <- function(df) {
 
-	## Simplify geometry for faster rendering
-	map_sf_simple <- sf::st_simplify(map_sf, dTolerance = 0.005, preserveTopology = TRUE)
+    purrr::pmap_chr(df, function(municipality_mapped, region,
+                                  cont_risk, cont_q025, cont_q975,
+                                  cont_hazard, svi_composite,
+                                  population_total, ...) {
 
-	## Convert to GeoJSON for embedding
-	map_geojson <- geojsonio::geojson_json(map_sf_simple)
+        dots <- list(...)
 
+        ## ── Header ───────────────────────────────────────────────────────────
+        header <- paste0(
+            "<strong style='font-size:13px;'>", municipality_mapped, "</strong><br/>",
+            "<em style='color:#555;'>Region: ", region, "</em>",
+            "<hr style='margin:5px 0;'/>"
+        )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# EXTRACT DISEASE GROUP METADATA
-# ─────────────────────────────────────────────────────────────────────────────
-## Build a lookup from internal disease_group keys to display labels
+        ## ── Demographic summary ───────────────────────────────────────────────
+        demo_rows <- paste0(
+            "<table style='width:100%;border-collapse:collapse;font-size:12px;margin-bottom:4px;'>",
+            "<tr>",
+              "<td style='color:#555;padding:2px 6px 2px 0;'>Population</td>",
+              "<td style='font-weight:600;padding:2px 0;' colspan='2'>",
+                format(round(population_total), big.mark = ","),
+              "</td>",
+            "</tr>",
+            "<tr>",
+              "<td style='color:#555;padding:2px 6px 2px 0;'>SVI Composite</td>",
+              "<td style='font-weight:600;padding:2px 0;' colspan='2'>",
+                ifelse(is.na(svi_composite), "n/a", round(svi_composite, 2)),
+              "</td>",
+            "</tr>",
+            "</table>"
+        )
 
-	disease_meta <- group_index_summary_maxsss |>
-		distinct(disease_group, disease_label) |>
-		arrange(disease_label)
+        ## ── Section header helper ─────────────────────────────────────────────
+        section_header <- function(title) {
+            paste0(
+                "<tr>",
+                  "<td colspan='3' style='",
+                    "font-size:11px;font-weight:700;letter-spacing:0.04em;",
+                    "text-transform:uppercase;color:#888;",
+                    "padding:5px 0 2px 0;border-top:1px solid #ddd;",
+                  "'>", title, "</td>",
+                "</tr>"
+            )
+        }
 
-	disease_meta_json <- toJSON(
-		disease_meta |> mutate(key = disease_group),
-		auto_unbox = TRUE
-	)
+        ## ── Risk index rows ───────────────────────────────────────────────────
+        risk_rows <- paste0(
+            "<table style='width:100%;border-collapse:collapse;font-size:12px;'>",
+            section_header("Risk Indices"),
+            "<tr>",
+              "<td style='color:#555;padding:2px 6px 2px 0;'>Overall Risk</td>",
+              "<td style='font-weight:600;padding:2px 0;'>",
+                round(cont_risk, 2),
+              "</td>",
+              "<td style='color:#777;padding:2px 0 2px 8px;font-size:11px;'>",
+                "(", round(cont_q025, 2), " \u2013 ", round(cont_q975, 2), ")",
+              "</td>",
+            "</tr>"
+        )
 
-	cat("  Disease groups for dropdown:\n")
-	purrr::walk2(disease_meta$disease_group, disease_meta$disease_label, function(k, v) {
-		cat("    ", k, "→", v, "\n")
-	})
-	cat("\n")
+        ## ── Hazard index rows ─────────────────────────────────────────────────
+        hazard_rows <- paste0(
+            section_header("Hazard Indices"),
+            "<tr>",
+              "<td style='color:#555;padding:2px 6px 2px 0;'>Overall Hazard</td>",
+              "<td style='font-weight:600;padding:2px 0;'>",
+                round(cont_hazard, 2),
+              "</td>",
+              "<td></td>",
+            "</tr>"
+        )
 
+        ## ── Per-group hazard rows ─────────────────────────────────────────────
+        group_rows <- purrr::map2_chr(dg_keys, dg_labels, function(k, lbl) {
+            mean_val <- dots[[paste0("cont_group_idx_mean_", k)]]
+            q025_val <- dots[[paste0("cont_group_idx_q025_", k)]]
+            q975_val <- dots[[paste0("cont_group_idx_q975_", k)]]
+            paste0(
+                "<tr style='border-top:1px solid #eee;'>",
+                  "<td style='color:#555;padding:2px 6px 2px 0;'>", lbl, "</td>",
+                  "<td style='font-weight:600;padding:2px 0;'>",
+                    ifelse(is.na(mean_val), "n/a", round(mean_val, 2)),
+                  "</td>",
+                  "<td style='color:#777;padding:2px 0 2px 8px;font-size:11px;'>",
+                    ifelse(
+                        is.na(q025_val), "",
+                        paste0("(", round(q025_val, 2), " \u2013 ", round(q975_val, 2), ")")
+                    ),
+                  "</td>",
+                "</tr>"
+            )
+        }) |> paste(collapse = "")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILD BASE LEAFLET MAP
-# ─────────────────────────────────────────────────────────────────────────────
-
-	cat("  Building Leaflet base map...\n")
-
-	base_map <- leaflet(
-		options = leafletOptions(zoomControl = FALSE)
-	) |>
-		addProviderTiles(providers$CartoDB.Positron,   group = "Light") |>
-		addProviderTiles(providers$Esri.WorldImagery,  group = "Satellite") |>
-		addProviderTiles(providers$OpenTopoMap,        group = "Terrain") |>
-		setView(lng = 43.5, lat = 42.2, zoom = 7) |>
-		addLayersControl(
-			baseGroups = c("Light", "Satellite", "Terrain"),
-			position   = "topright",
-			options    = layersControlOptions(collapsed = TRUE)
-		) |>
-		addScaleBar(position = "bottomleft")
-
-	cat("  ✓ Base map built\n")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CUSTOM CSS
-# ─────────────────────────────────────────────────────────────────────────────
-
-	popup_css <- HTML('
-	<style>
-		.risk-popup .leaflet-popup-content-wrapper {
-			border-radius: 8px;
-			box-shadow: 0 4px 15px rgba(0,0,0,0.25);
-			padding: 0;
-		}
-		.risk-popup .leaflet-popup-content {
-			margin: 0;
-			width: auto !important;
-		}
-		.risk-popup .leaflet-popup-tip {
-			background: #440154;
-		}
-		.popup-container {
-			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-			font-size: 13px;
-			min-width: 380px;
-			max-width: 440px;
-		}
-		.popup-header {
-			background: linear-gradient(135deg, #440154 0%, #31688e 50%, #35b779 100%);
-			color: white;
-			padding: 14px 16px;
-			border-radius: 8px 8px 0 0;
-		}
-		.popup-header h3 { margin: 0 0 3px 0; font-size: 16px; font-weight: 600; }
-		.popup-header .sub { font-size: 11px; opacity: 0.85; }
-		.popup-body { padding: 12px 14px; }
-		.popup-body table {
-			width: 100%; border-collapse: collapse;
-			font-size: 12px; margin-bottom: 10px;
-		}
-		.popup-body th {
-			text-align: left; padding: 5px 6px;
-			background: #f4f4f4; border-bottom: 1px solid #ddd;
-			font-weight: 600; color: #444;
-		}
-		.popup-body td {
-			padding: 4px 6px; border-bottom: 1px solid #eee;
-		}
-		.popup-body .section-label {
-			font-weight: 600; color: #2c3e50;
-			margin: 8px 0 4px 0; font-size: 12px;
-			border-bottom: 1px solid #eee; padding-bottom: 3px;
-		}
-		.approach-maxsss    { color: #c0392b; font-weight: 600; }
-		.approach-continuous { color: #2980b9; font-weight: 600; }
-	</style>
-	')
-
+        paste0(header, demo_rows, risk_rows, hazard_rows, group_rows, "</table>")
+    })
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JAVASCRIPT: onRender FOR DROPDOWN + CHOROPLETH DYNAMICS
-# ─────────────────────────────────────────────────────────────────────────────
-## Uses onRender for reliable map object access. Embeds municipality data as
-## JSON, builds dropdown + toggle controls, and wires colour updates.
-
-	onrender_js <- paste0('
-	function(el, x) {
-		var map = this;
-
-		/* ── Municipality data lookup ────────────────────────────────────── */
-		var geojsonData = ', map_geojson, ';
-		var diseaseMeta = ', disease_meta_json, ';
-		var SCALE_MAX   = ', SCALE_MAX, ';
-
-		var geoLayer = null;
-		var currentApproach = "maxsss";
-		var currentView     = "overall";
-
-		/* ── Viridis interpolation ───────────────────────────────────────── */
-		var viridisStops = [
-			[68,1,84],[72,40,120],[62,74,137],[49,104,142],
-			[38,130,142],[31,158,137],[53,183,121],[109,205,89],
-			[180,222,44],[253,231,37]
-		];
-
-		function viridis(t) {
-			t = Math.max(0, Math.min(1, t));
-			var idx = t * (viridisStops.length - 1);
-			var i   = Math.floor(idx);
-			var f   = idx - i;
-			if (i >= viridisStops.length - 1) { i = viridisStops.length - 2; f = 1; }
-			var r = Math.round(viridisStops[i][0] + f * (viridisStops[i+1][0] - viridisStops[i][0]));
-			var g = Math.round(viridisStops[i][1] + f * (viridisStops[i+1][1] - viridisStops[i][1]));
-			var b = Math.round(viridisStops[i][2] + f * (viridisStops[i+1][2] - viridisStops[i][2]));
-			return "rgb(" + r + "," + g + "," + b + ")";
-		}
-
-		/* ── Property key construction ───────────────────────────────────── */
-		function getKey(approach, view, stat) {
-			return approach + "_" + view + "_" + stat;
-		}
-
-		/* ── Number formatting ───────────────────────────────────────────── */
-		function fmt(v, d) {
-			if (v === null || v === undefined || isNaN(v)) return "—";
-			return Number(v).toFixed(d === undefined ? 2 : d);
-		}
-
-		/* ── Popup builder ───────────────────────────────────────────────── */
-		function buildPopup(props) {
-			var name = props.NAME_2 || "Unknown";
-			var pop  = props.population_total;
-			var svi  = props.svi_norm;
-			var sviR = props.svi_raw;
-
-			/* Determine which view label to show */
-			var viewLabel = "Overall Risk";
-			diseaseMeta.forEach(function(d) {
-				if (d.key === currentView) viewLabel = d.disease_label;
-			});
-
-			var html = "<div class=\\"popup-container\\">" +
-				"<div class=\\"popup-header\\">" +
-				"<h3>" + name + "</h3>" +
-				"<div class=\\"sub\\">Population: " + (pop ? Number(pop).toLocaleString() : "—") +
-				" &nbsp;|&nbsp; SVI (norm): " + fmt(svi) + " (raw: " + fmt(sviR, 3) + ")</div>" +
-				"</div>" +
-				"<div class=\\"popup-body\\">";
-
-			/* Side-by-side table for both approaches on the current view */
-			html += "<div class=\\"section-label\\">" + viewLabel + "</div>";
-			html += "<table><tr>" +
-				"<th></th>" +
-				"<th class=\\"approach-maxsss\\">maxSSS</th>" +
-				"<th class=\\"approach-continuous\\">Continuous</th></tr>";
-
-			var rows = [
-				["Mean",     "mean"],
-				["SD",       "sd"],
-				["Q 2.5%",   "q025"],
-				["Q 97.5%",  "q975"]
-			];
-
-			rows.forEach(function(r) {
-				var mKey = getKey("maxsss",     currentView, r[1]);
-				var cKey = getKey("continuous",  currentView, r[1]);
-				html += "<tr><td><strong>" + r[0] + "</strong></td>" +
-					"<td>" + fmt(props[mKey]) + "</td>" +
-					"<td>" + fmt(props[cKey]) + "</td></tr>";
-			});
-			html += "</table>";
-
-			/* Hazard row for overall view */
-			if (currentView === "overall") {
-				html += "<div class=\\"section-label\\">Hazard (Geometric Mean)</div>";
-				html += "<table><tr><th></th>" +
-					"<th class=\\"approach-maxsss\\">maxSSS</th>" +
-					"<th class=\\"approach-continuous\\">Continuous</th></tr>";
-				html += "<tr><td><strong>Mean</strong></td>" +
-					"<td>" + fmt(props.maxsss_hazard_mean) + "</td>" +
-					"<td>" + fmt(props.continuous_hazard_mean) + "</td></tr>";
-				html += "<tr><td><strong>SD</strong></td>" +
-					"<td>" + fmt(props.maxsss_hazard_sd) + "</td>" +
-					"<td>" + fmt(props.continuous_hazard_sd) + "</td></tr>";
-				html += "</table>";
-			}
-
-			html += "</div></div>";
-			return html;
-		}
-
-		/* ── Draw / update the GeoJSON layer ─────────────────────────────── */
-		function updateMap() {
-			if (geoLayer) map.removeLayer(geoLayer);
-
-			geoLayer = L.geoJSON(geojsonData, {
-				style: function(feature) {
-					var key = getKey(currentApproach, currentView, "mean");
-					var val = feature.properties[key];
-					var fillColor = "#cccccc";
-					if (val !== null && val !== undefined && !isNaN(val)) {
-						fillColor = viridis(val / SCALE_MAX);
-					}
-					return {
-						fillColor:   fillColor,
-						weight:      1,
-						color:       "#666",
-						fillOpacity: 0.75
-					};
-				},
-				onEachFeature: function(feature, layer) {
-					layer.on({
-						mouseover: function(e) {
-							e.target.setStyle({ weight: 3, color: "#333", fillOpacity: 0.9 });
-							e.target.bringToFront();
-						},
-						mouseout: function(e) {
-							geoLayer.resetStyle(e.target);
-						}
-					});
-					layer.bindPopup(buildPopup(feature.properties), {
-						className: "risk-popup",
-						maxWidth:  460
-					});
-				}
-			}).addTo(map);
-		}
-
-		/* ── Build control panel ─────────────────────────────────────────── */
-		var RiskControl = L.Control.extend({
-			options: { position: "topleft" },
-			onAdd: function() {
-				var container = L.DomUtil.create("div", "risk-control");
-				container.style.cssText =
-					"background:white;padding:10px 14px;border-radius:6px;" +
-					"box-shadow:0 2px 10px rgba(0,0,0,0.18);font-family:Arial,sans-serif;" +
-					"min-width:200px;";
-
-				/* Title */
-				var title = L.DomUtil.create("div", "", container);
-				title.style.cssText = "font-weight:bold;font-size:13px;color:#2c3e50;" +
-					"margin-bottom:8px;border-bottom:1px solid #eee;padding-bottom:6px;";
-				title.innerHTML = "INFORM Risk Index";
-
-				/* Approach toggle */
-				var apLabel = L.DomUtil.create("label", "", container);
-				apLabel.style.cssText = "color:#7f8c8d;font-size:10px;display:block;margin-bottom:2px;";
-				apLabel.innerText = "Approach:";
-
-				var apSel = L.DomUtil.create("select", "", container);
-				apSel.id = "approach-sel";
-				apSel.style.cssText = "width:100%;padding:4px;margin-bottom:8px;" +
-					"border:1px solid #ccc;border-radius:3px;font-size:11px;";
-				apSel.innerHTML =
-					"<option value=\\"maxsss\\">maxSSS (Conservative)</option>" +
-					"<option value=\\"continuous\\">Continuous (Liberal)</option>";
-
-				/* Disease group dropdown */
-				var dgLabel = L.DomUtil.create("label", "", container);
-				dgLabel.style.cssText = "color:#7f8c8d;font-size:10px;display:block;margin-bottom:2px;";
-				dgLabel.innerText = "View:";
-
-				var dgSel = L.DomUtil.create("select", "", container);
-				dgSel.id = "view-sel";
-				dgSel.style.cssText = "width:100%;padding:4px;" +
-					"border:1px solid #ccc;border-radius:3px;font-size:11px;";
-
-				/* Populate: Overall first, then disease groups */
-				var ovOpt = document.createElement("option");
-				ovOpt.value = "overall"; ovOpt.text = "Overall Risk";
-				dgSel.appendChild(ovOpt);
-
-				diseaseMeta.forEach(function(d) {
-					var opt = document.createElement("option");
-					opt.value = d.key; opt.text = d.disease_label;
-					dgSel.appendChild(opt);
-				});
-
-				/* Wire events */
-				apSel.onchange = function() {
-					currentApproach = this.value;
-					updateMap();
-				};
-				dgSel.onchange = function() {
-					currentView = this.value;
-					updateMap();
-				};
-
-				L.DomEvent.disableClickPropagation(container);
-				L.DomEvent.disableScrollPropagation(container);
-				return container;
-			}
-		});
-
-		new RiskControl().addTo(map);
-
-		/* ── Legend ───────────────────────────────────────────────────────── */
-		var legend = L.control({ position: "bottomright" });
-		legend.onAdd = function() {
-			var div = L.DomUtil.create("div", "info legend");
-			div.style.cssText =
-				"background:white;padding:10px 12px;border-radius:6px;" +
-				"box-shadow:0 2px 8px rgba(0,0,0,0.15);font-family:Arial,sans-serif;";
-
-			var grades = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-			var html = "<div style=\\"font-weight:bold;font-size:11px;margin-bottom:6px;\\">Risk (0–10)</div>";
-			for (var i = 0; i < grades.length - 1; i++) {
-				var col = viridis(grades[i] / 10);
-				html += "<i style=\\"background:" + col +
-					";width:18px;height:14px;display:inline-block;margin-right:4px;\\"></i>";
-			}
-			html += "<br><span style=\\"font-size:10px;\\">0</span>" +
-				"<span style=\\"font-size:10px;float:right;\\">10</span>";
-			html += "<br><div style=\\"margin-top:6px;\\">" +
-				"<i style=\\"background:#cccccc;width:18px;height:14px;display:inline-block;" +
-				"margin-right:4px;\\"></i><span style=\\"font-size:10px;\\">No data</span></div>";
-
-			div.innerHTML = html;
-			return div;
-		};
-		legend.addTo(map);
-
-		/* ── Add zoom control manually (we removed default) ──────────────── */
-		L.control.zoom({ position: "bottomright" }).addTo(map);
-
-		/* ── Initial render ──────────────────────────────────────────────── */
-		updateMap();
-		console.log("INFORM Risk comparison map initialized.");
-	}
-	')
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ASSEMBLE AND SAVE
+# BUILD LAYER DEFINITIONS  (continuous approach only, neutral labels)
 # ─────────────────────────────────────────────────────────────────────────────
 
-	cat("  Assembling final map...\n")
+layer_defs <- list(
+    list(id = "overall_risk",   label = "Overall Risk",
+         mean = "cont_risk",    q025 = "cont_q025", q975 = "cont_q975"),
+    list(id = "overall_hazard", label = "Overall Hazard",
+         mean = "cont_hazard",  q025 = NULL,        q975 = NULL)
+)
 
-	final_map <- base_map |>
-		htmlwidgets::prependContent(popup_css) |>
-		htmlwidgets::onRender(onrender_js)
+for (i in seq_along(dg_keys)) {
+    k <- dg_keys[i]; lbl <- dg_labels[i]
+    layer_defs <- c(layer_defs, list(
+        list(id   = paste0("grp_", k),
+             label = lbl,
+             mean  = paste0("cont_group_idx_mean_", k),
+             q025  = paste0("cont_group_idx_q025_", k),
+             q975  = paste0("cont_group_idx_q975_", k))
+    ))
+}
 
-	htmlwidgets::saveWidget(
-		final_map,
-		file          = OUTPUT_HTML,
-		selfcontained = TRUE,
-		title         = "Georgia INFORM Risk — maxSSS vs Continuous"
-	)
+# ─────────────────────────────────────────────────────────────────────────────
+# BUILD POPUP HTML  (same content for every layer — municipality-level table)
+# ─────────────────────────────────────────────────────────────────────────────
 
-	cat("\n══════════════════════════════════════════════════════════════\n")
-	cat("  INTERACTIVE RISK MAP SAVED\n")
-	cat("══════════════════════════════════════════════════════════════\n\n")
-	cat("  Output:", OUTPUT_HTML, "\n\n")
-	cat("  Controls:\n")
-	cat("    • Approach toggle:  maxSSS (Conservative) / Continuous (Liberal)\n")
-	cat("    • View selector:   Overall Risk + ", nrow(disease_meta), " disease groups\n")
-	cat("    • Basemaps:        Light / Satellite / Terrain\n\n")
-	cat("  Popup content:\n")
-	cat("    • Side-by-side maxSSS vs. Continuous (mean, SD, 95%% CI)\n")
-	cat("    • Hazard breakdown (overall view only)\n")
-	cat("    • Population and normalised SVI\n\n")
+## Pre-compute once; reused across all layers so clicking always shows
+## the full risk profile regardless of which layer is currently displayed
+popup_html <- map_sf |>
+    sf::st_drop_geometry() |>
+    make_popup()
 
-```
+# ─────────────────────────────────────────────────────────────────────────────
+# BUILD LEAFLET MAP
+# ─────────────────────────────────────────────────────────────────────────────
 
-```{r}
+inform_map <- leaflet(map_sf) |>
+    addProviderTiles(providers$CartoDB.Positron) |>
+    addPolygons(
+        data        = georgia_admin0,
+        fillColor   = "grey90",
+        fillOpacity = 0.3,
+        color       = "grey70",
+        weight      = 1.5,
+        group       = "base",
+        popup       = "Area outside government control"
+    )
 
+for (ld in layer_defs) {
 
-```
+    pal_layer <- colorNumeric(
+        palette  = "viridis",
+        domain   = map_sf[[ld$mean]],
+        na.color = "transparent"
+    )
 
-```{r}
+    inform_map <- inform_map |>
+        addPolygons(
+            fillColor        = ~pal_layer(map_sf[[ld$mean]]),
+            fillOpacity      = 0.7,
+            color            = "white",
+            weight           = 1,
+            popup            = popup_html,
+            group            = ld$label,
+            highlightOptions = highlightOptions(
+                weight       = 2,
+                color        = "#666",
+                fillOpacity  = 0.9,
+                bringToFront = TRUE
+            )
+        ) |>
+        addLegend(
+            position = "bottomright",
+            pal      = pal_layer,
+            values   = map_sf[[ld$mean]],
+            title    = ld$label,
+            opacity  = 0.7,
+            na.label = "",
+            group    = ld$label,
+            layerId  = paste0("legend_", ld$id)
+        )
+}
 
+layer_labels <- purrr::map_chr(layer_defs, "label")
+legend_ids   <- purrr::map_chr(layer_defs, ~ paste0("legend_", .x$id))
 
+inform_map <- inform_map |>
+    addLayersControl(
+        overlayGroups = layer_labels,
+        options       = layersControlOptions(collapsed = TRUE)
+    ) |>
+    hideGroup(layer_labels[-1])
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JS: enforce one-layer-at-a-time and sync legend visibility
+# ─────────────────────────────────────────────────────────────────────────────
+
+js_layer_array <- layer_labels |>
+    purrr::imap_chr(~ paste0(
+        '["', gsub('"', '\\"', .x), '","', legend_ids[.y], '"]'
+    )) |>
+    paste(collapse = ",\n  ")
+
+js_snippet <- paste0('
+function(el, x) {
+  var layers = [
+  ', js_layer_array, '
+  ];
+  this.on("overlayadd", function(e) {
+    layers.forEach(function(pair) {
+      var groupName = pair[0];
+      var legendId  = pair[1];
+      var isActive  = (groupName === e.name);
+      var legendEl  = document.getElementById(legendId);
+      if (legendEl) legendEl.style.display = isActive ? "block" : "none";
+      if (!isActive) {
+        var layerId = Object.keys(e.target._layers).find(function(id) {
+          var l = e.target._layers[id];
+          return l.options && l.options.group === groupName;
+        });
+        if (layerId) e.target.removeLayer(e.target._layers[layerId]);
+      }
+    });
+  });
+  layers.forEach(function(pair, idx) {
+    var legendEl = document.getElementById(pair[1]);
+    if (legendEl) legendEl.style.display = idx === 0 ? "block" : "none";
+  });
+}
+')
+
+inform_map <- inform_map |>
+    htmlwidgets::onRender(js_snippet)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DISPLAY & SAVE
+# ─────────────────────────────────────────────────────────────────────────────
+
+inform_map
+
+# htmlwidgets::saveWidget(
+#     widget        = inform_map,
+#     file          = file.path(OUTPUT_DIR, "inform_risk_map.html"),
+#     selfcontained = TRUE
+# )
+# 
+# cat("Interactive INFORM map saved to:", file.path(OUTPUT_DIR, "inform_risk_map.html"), "\n")
+# 
 ```
 
 ```{r}
