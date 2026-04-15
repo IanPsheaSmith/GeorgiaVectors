@@ -5,45 +5,4767 @@ date: "`r Sys.Date()`"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
+```{r setup}
 
   # Load required packages
     if (!requireNamespace("pacman", quietly = TRUE)) {
       install.packages("pacman")
     }
+
     # Use pacman to install and loac all packages
-      pacman::p_load(readxl, dynamicSDM, rgbif, dplyr, purrr, tidyverse, lubridate,
+      pacman::p_load(dynamicSDM, rgbif, dplyr, purrr, tidyverse, lubridate,
                      geodata, leaflet, terra, sf, ecospat, biomod2, maxnet,
-                     furrr, future, progressr, ohvbd, tidyterra) 
+                     furrr, future, progressr, ohvbd, tidyterra, dismo, gbm,
+                     exactextractr, readxl, httr, glue, rgeoda, truncnorm,
+                     viridis, blockCV)
+
 ```
 
+```{r Download GBIF occurence data}
+
+  # Define list of species
+    species_list <- c(
+      "Aedes aegypti",
+      "Aedes albopictus",
+      "Aedes geniculatus",
+      "Aedes vexans",
+      "Aedes caspius",
+      "Culex pipiens",
+      "Culex theileri",
+      "Culex hortensis",
+      "Culex tritaeniorhynchus",
+      "Culiseta annulata",
+      "Culiseta longiareolata",
+      "Ixodes ricinus",
+      "Dermacentor reticulatus",
+      "Haemaphysalis inermis",
+      "Dermacentor marginatus",
+      "Rhipicephalus sanguineus",
+      "Hyalomma marginatum",
+      "Hyalomma aegyptium",
+      "Anopheles claviger",
+      "Anopheles hyrcanus",
+      "Anopheles maculipennis",
+      "Anopheles plumbeus",
+      "Anopheles sacharovi"
+    )
+
+  # Get taxon keys for all species
+    species_keys <- species_list |>
+      map_dfr(~{
+        backbone <- name_backbone(name = .x)
+        tibble(
+          searched_name = .x,
+          taxon_key = backbone$usageKey,
+          scientific_name = backbone$scientificName,
+          rank = backbone$rank,
+          status = backbone$status
+        )
+      })
+
+  # Download occurrence data for Georgia (country code: GE)
+    vector_georgia_download <- occ_download(
+      pred_in("taxonKey", species_keys$taxon_key),
+      pred("country", "GE"),
+      pred("hasCoordinate", TRUE),
+      format = "SIMPLE_CSV",
+      user = "ianpsheasmith",
+      pwd = "Is#38123",
+      email = "ianpsheasmith@ufl.edu"
+    )
+  
+  # Wait for download to complete (this can take several minutes)
+    occ_download_wait(vector_georgia_download)
+  
+  # Import the downloaded data
+    vector_occurrences <- occ_download_get(vector_georgia_download) |>
+      occ_download_import()
+    
+  # Summary by species
+    species_summary <- vector_occurrences |>
+      dplyr::select(species, scientificName, genus, family) |>
+      group_by(species, scientificName) |>
+      summarise(
+        n_occurrences = n(),
+        .groups = "drop"
+      ) |>
+      arrange(desc(n_occurrences))
+    
+    print(species_summary)
+
+```
+
+```{r Load in VectorMap Data}
+
+  tick_data_vm <- read.csv("C:/Users/ianpsheasmith/Documents/GitHub/GeorgiaVectors/Vector_Data/TickDataRaw.csv")
+  mosquito_data_vm <- read.csv("C:/Users/ianpsheasmith/Documents/GitHub/GeorgiaVectors/Vector_Data/MosquitoDataRaw.csv")
+  tick_georgia_new <- read.csv("C:/Users/ianpsheasmith/Documents/GitHub/GeorgiaVectors/Vector_Data/Ticks_Georgia_New.csv")
+
+```
+
+```{r Pull date, location and species from data}
+
+  # Function to create species name from Genus + Species
+    create_species_name <- function(genus, species) {
+        case_when(
+            is.na(genus) | genus == "" | genus == "No data" ~ NA_character_,
+            is.na(species) | species == "" | species == "No data" ~ genus,
+            species == "spp." | species == "sp." ~ paste(genus, "sp."),
+            TRUE ~ paste(genus, species)
+        )
+    }
+
+  # Helper function to convert empty strings to NA
+    empty_to_na <- function(x) {
+        if_else(x == "" | x == "No data", NA_character_, x)
+    }
+
+  # Date parsing function
+    parse_date_flexible <- function(date_col) {
+        if(inherits(date_col, "Date")) {
+            return(date_col)
+        }
+        
+        date_char <- as.character(date_col)
+        date_char <- str_trim(date_char)
+        
+        parsed_date <- case_when(
+            is.na(date_char) | date_char == "" | date_char == "No data" ~ as.Date(NA),
+            str_detect(date_char, "^\\d{1,2}/\\d{1,2}/\\d{4}\\s+\\d{1,2}:\\d{2}:\\d{2}\\s+[AP]M") ~ 
+                as.Date(mdy_hms(date_char)),
+            str_detect(date_char, "^\\d{1,2}/\\d{1,2}/\\d{4}\\s+\\d{1,2}:\\d{2}") ~ 
+                as.Date(mdy_hm(date_char)),
+            str_detect(date_char, "^\\d{1,2}/\\d{1,2}/\\d{4}$") ~ mdy(date_char),
+            str_detect(date_char, "^\\d{4}-\\d{2}-\\d{2}") ~ ymd(date_char),
+            str_detect(date_char, "^\\d{1,2}-[A-Za-z]{3}-\\d{2}$") ~ dmy(date_char),
+            TRUE ~ as.Date(NA)
+        )
+        
+        return(parsed_date)
+    }
+
+  # Process vector_occurrences (GBIF data)
+    vector_occurrences_std <- vector_occurrences |>
+        mutate(
+            species = species,  # Use the 'species' column, not 'scientificName'
+            date = parse_date_flexible(eventDate),
+            latitude = decimalLatitude,
+            longitude = decimalLongitude,
+            count = as.numeric(individualCount),
+            source = "GBIF"
+        ) |>
+        dplyr::select(species, date, latitude, longitude, count, source)
+
+  # Process tick_data_vm
+    tick_data_vm_std <- tick_data_vm |>
+        filter(
+            !(Genus %in% c("No collection (Ticks)", "No data") | 
+              is.na(Genus))
+        ) |>
+        mutate(
+            date_raw = coalesce(
+                empty_to_na(as.character(EarliestDateCollected)),
+                empty_to_na(as.character(VerbatimCollectingDate))
+            ),
+            species = create_species_name(Genus, Species),
+            date = parse_date_flexible(date_raw),
+            latitude = as.numeric(DecimalLongitude),
+            longitude = as.numeric(DecimalLatitude),
+            count = as.numeric(IndividualCount),
+            source = "VectorMap_Ticks"
+        ) |>
+        dplyr::select(species, date, latitude, longitude, count, source)
+
+  # Process mosquito_data_vm
+    mosquito_data_vm_std <- mosquito_data_vm |>
+        filter(
+            !(Genus %in% c("No collection", "No data") | 
+              is.na(Genus))
+        ) |>
+        mutate(
+            date_raw = coalesce(
+                empty_to_na(as.character(EarliestDateCollected)),
+                empty_to_na(as.character(VerbatimCollectingDate))
+            ),
+            species = create_species_name(Genus, Species),
+            date = parse_date_flexible(date_raw),
+            latitude = as.numeric(DecimalLongitude),
+            longitude = as.numeric(DecimalLatitude),
+            count = as.numeric(IndividualCount),
+            source = "VectorMap_Mosquitoes"
+        ) |>
+        dplyr::select(species, date, latitude, longitude, count, source)
+  
+  # Process tick_georgia_new
+    tick_georgia_new_std <- tick_georgia_new |>
+        filter(
+            !(Genus %in% c("No collection (Ticks)", "No data") | 
+              is.na(Genus))
+        ) |>
+        mutate(
+            species = create_species_name(Genus, Species),
+            date = parse_date_flexible(Start_.Date),
+            latitude = as.numeric(Latitude),
+            longitude = as.numeric(Longitude),
+            count = as.numeric(Vector.Count),
+            source = "Georgia_Ticks"
+        ) |>
+        dplyr::select(species, date, latitude, longitude, count, source)
+  
+  # Combine all datasets
+    unified_vector_data <- bind_rows(
+        vector_occurrences_std,
+        tick_data_vm_std,
+        mosquito_data_vm_std,
+        tick_georgia_new_std
+    ) |>
+        filter(!is.na(species)) |>
+        arrange(date, species)
+  
+  # Clean species names
+    standardize_species <- function(species_name) {
+        species_name |>
+            str_remove_all("\\([^)]+\\)") |>
+            str_remove_all(",\\s*\\d{4}") |>
+            str_remove_all("\\s+\\d{4}$") |>
+            str_trim() |>
+            str_extract("^\\S+\\s+\\S+") |>
+            str_trim()
+    }
+  
+  # Function to identify records to remove
+    should_remove <- function(species_name) {
+        case_when(
+            str_detect(species_name, "^BOLD:") ~ TRUE,
+            str_detect(species_name, "Unidentified") ~ TRUE,
+            str_detect(species_name, "<Null>") ~ TRUE,
+            str_detect(species_name, "^\\S+\\s*$") ~ TRUE,
+            str_detect(species_name, "^\\S+\\s+$") ~ TRUE,
+            str_detect(species_name, "\\ssp\\.$") ~ TRUE,
+            TRUE ~ FALSE
+        )
+    }
+  
+  # Clean the dataset
+    unified_vector_data <- unified_vector_data |>
+        mutate(
+            species_clean = standardize_species(species),
+            remove_flag = should_remove(species)
+        ) |>
+        filter(
+            !remove_flag,
+            !is.na(species_clean),
+            species_clean != ""
+        ) |>
+        mutate(species = species_clean) |>
+        dplyr::select(-species_clean, -remove_flag)
+  
+  # Summary statistics
+    summary_stats <- unified_vector_data |>
+        group_by(source) |>
+        summarise(
+            n_records = n(),
+            n_species = n_distinct(species),
+            n_with_count = sum(!is.na(count)),
+            n_with_coords = sum(!is.na(latitude) & !is.na(longitude)),
+            n_with_date = sum(!is.na(date)),
+            date_range = if_else(
+                sum(!is.na(date)) > 0,
+                paste(min(date, na.rm = TRUE), "to", max(date, na.rm = TRUE)),
+                "No dates available"
+            )
+        )
+  
+    print(sort(unique(unified_vector_data$species)))
+  
+  # View the result
+    unified_vector_data
+```
+
+```{r Clean species column}
+
+  # Function to standardize species names
+    standardize_species <- function(species_name) {
+        species_name |>
+            # Remove author citations in parentheses
+              str_remove_all("\\([^)]+\\)") |>
+            # Remove author citations without parentheses (comma followed by year)
+              str_remove_all(",\\s*\\d{4}") |>
+            # Remove standalone years
+              str_remove_all("\\s+\\d{4}$") |>
+            # Remove leading/trailing whitespace
+              str_trim() |>
+            # Extract just Genus and species (first two words)
+              str_extract("^\\S+\\s+\\S+") |>
+            # Final trim
+              str_trim()
+    }
+
+  # Function to identify records to remove
+    should_remove <- function(species_name) {
+        case_when(
+            # Remove BOLD identifiers
+              str_detect(species_name, "^BOLD:") ~ TRUE,
+            # Remove "Unidentified"
+              str_detect(species_name, "Unidentified") ~ TRUE,
+            # Remove <Null> entries
+              str_detect(species_name, "<Null>") ~ TRUE,
+            # Remove entries that are just genus + blank
+              str_detect(species_name, "^\\S+\\s*$") ~ TRUE,
+            # Remove entries with only whitespace after genus
+              str_detect(species_name, "^\\S+\\s+$") ~ TRUE,
+            # Remove entries ending in "sp." (genus-level only)
+              str_detect(species_name, "\\ssp\\.$") ~ TRUE,
+            # Keep everything else
+              TRUE ~ FALSE
+        )
+    }
+
+  # Clean the unified dataset
+    unified_vector_data_clean <- unified_vector_data |>
+        mutate(
+            # Create standardized species name
+              species_clean = standardize_species(species),
+            # Flag records to remove
+              remove_flag = should_remove(species)
+        ) |>
+      # Keep records that shouldn't be removed and have a valid species_clean
+        filter(
+            !remove_flag,
+            !is.na(species_clean),
+            species_clean != ""
+        ) |>
+      # Replace original species with cleaned version
+        mutate(species = species_clean) |>
+      # Remove temporary columns
+        dplyr::select(-species_clean, -remove_flag)
+
+  # Check the cleaning results
+    print(sort(unique(unified_vector_data_clean$species)))
+  
+  # Summary by source after cleaning
+    summary_after_cleaning <- unified_vector_data_clean |>
+        group_by(source) |>
+        summarise(
+            n_records = n(),
+            n_species = n_distinct(species),
+            n_with_count = sum(!is.na(count)),
+            n_with_coords = sum(!is.na(latitude) & !is.na(longitude)),
+            n_with_date = sum(!is.na(date))
+        )
+    
+    print(summary_after_cleaning)
+
+  # Replace the unified dataset with cleaned version
+    unified_vector_data <- unified_vector_data_clean
+
+```
+
+```{r Extract Unique Observations for the original 22 Target Species}
+
+  # Define the 22 unique vector species of interest
+    target_species <- c(
+      "Aedes aegypti",
+      "Aedes albopictus",
+      "Aedes geniculatus",
+      "Aedes vexans",
+      "Aedes caspius",
+      "Culex pipiens",
+      "Culex tritaeniorhynchus",
+      "Culex theileri",
+      "Culiseta annulata",
+      "Culex hortensis",
+      "Culiseta longiareolata",
+      "Anopheles sacharovi",
+      "Anopheles maculipennis",
+      "Anopheles plumbeus",
+      "Anopheles hyrcanus",
+      "Ixodes ricinus",
+      "Dermacentor reticulatus",
+      "Haemaphysalis inermis",
+      "Dermacentor marginatus",
+      "Rhipicephalus sanguineus",
+      "Hyalomma marginatum",
+      "Hyalomma aegyptium"
+    )
+  
+  # Remove duplicates based on unique species-date-location combinations,
+  # then filter to retain only the 22 target vector species
+    unified_vector_data_filtered <- unified_vector_data |>
+      dplyr::distinct(species, date, latitude, longitude, .keep_all = TRUE) |>
+      dplyr::filter(species %in% target_species)
+
+```
+
+```{r Load in Georgia shapefile}
+
+  Georgia_adm2 <- geodata::gadm(
+      country = "GE", 
+      level = 2, 
+      path = "C:/Users/ianpsheasmith/Documents/GitHub/GeorgiaVectors/Shapefiles"
+  )
+
+```
+
+```{r Canonical Municipality Boundaries}
+
+  # Set the municipalities and boundaries for Georgia explicitly
+
+  ## Unzip the GeoJSON archive
+    geojson_zip <- "C:/Users/ianpsheasmith/Documents/GitHub/GVecVuln/data/geo_admin_boundaries.geojson.zip"
+    temp_dir    <- tempdir()
+    unzip(geojson_zip, exdir = temp_dir, overwrite = TRUE)
+
+  ## Read all three administrative levels
+    georgia_admin0 <- st_read(file.path(temp_dir, "geo_admin0.geojson"), quiet = TRUE)
+    georgia_admin1 <- st_read(file.path(temp_dir, "geo_admin1.geojson"), quiet = TRUE)
+    georgia_admin2 <- st_read(file.path(temp_dir, "geo_admin2.geojson"), quiet = TRUE)
+
+  ## ── Name mapping: GeoJSON adm2_name → SVI municipality slug ──────────────
+    name_mapping <- c(
+        ## City units → parent municipality
+        "Akhaltsikhe City" = "axalcixe",    "Akhaltsikhe"  = "axalcixe",
+        "Ambrolauri City"  = "ambrolauri",   "Ambrolauri"   = "ambrolauri",
+        "Gori City"        = "gori",         "Gori"         = "gori",
+        "Mtskheta City"    = "mcxeta",       "Mtskheta"     = "mcxeta",
+        "Ozurgeti City"    = "ozurgeti",     "Ozurgeti"     = "ozurgeti",
+        "Telavi City"      = "telavi",       "Telavi"       = "telavi",
+        "Zugdidi City"     = "zugdidi",      "Zugdidi"      = "zugdidi",
+        ## Self-governing cities
+        "Batumi"  = "batumi",  "Kutaisi" = "kutaisi",
+        "Poti"    = "poti",    "Rustavi" = "rustavi",
+        ## Romanisation differences
+        "Akhmeta"        = "axmeta",        "Khashuri"       = "xashuri",
+        "Kharagauli"     = "xaragauli",     "Khobi"          = "xobi",
+        "Khulo"          = "xulo",          "Khelvachauri"   = "xelvachauri",
+        "Khoni"          = "khoni",         "Dedoplistskaro" = "dedofliswyaro",
+        "Kvareli"        = "yvareli",       "Tetritskaro"    = "tetriwyaro",
+        "Tskaltubo"      = "wyaltubo",      "Tsageri"        = "cageri",
+        "Tsalenjikha"    = "walenjixa",     "Tsalka"         = "walka",
+        "Chkhorotsku"    = "chxorowyu",     "Baghdati"       = "bagdadi",
+        "Bagdati"        = "bagdadi",       "Kareli"         = "qareli",
+        "Qareli"         = "qareli",        "Sighnaghi"      = "signagi",
+        "Signagi"        = "signagi",       "Ninotsminda"    = "ninowminda",
+        "Tkibuli"        = "tyibuli",       "Zestaponi"      = "zestafoni",
+        "Kazbegi"        = "yazbegi",
+        ## Direct matches
+        "Abasha"      = "abasha",      "Adigeni"     = "adigeni",
+        "Aspindza"    = "aspindza",     "Akhalkalaki" = "axalqalaqi",
+        "Bolnisi"     = "bolnisi",      "Borjomi"     = "borjomi",
+        "Chiatura"    = "chiatura",     "Chokhatauri" = "choxatauri",
+        "Dmanisi"     = "dmanisi",      "Dusheti"     = "dusheti",
+        "Gardabani"   = "gardabani",    "Gurjaani"    = "gurjaani",
+        "Kaspi"       = "kaspi",        "Lagodekhi"   = "lagodexi",
+        "Lanchkhuti"  = "lanchxuti",    "Lentekhi"    = "lentexi",
+        "Marneuli"    = "marneuli",     "Martvili"    = "martvili",
+        "Mestia"      = "mestia",       "Oni"         = "oni",
+        "Keda"        = "qeda",         "Kobuleti"    = "qobuleti",
+        "Sachkhere"   = "sachxere",     "Sagarejo"    = "sagarejo",
+        "Samtredia"   = "samtredia",    "Senaki"      = "senaki",
+        "Shuakhevi"   = "shuaxevi",     "Terjola"     = "terjola",
+        "Tianeti"     = "tianeti",       "Vani"        = "vani"
+    )
+
+  ## ── Map names and extract Tbilisi from admin1 ────────────────────────────
+    georgia_admin2_mapped <- georgia_admin2 |>
+        mutate(
+            municipality_mapped = dplyr::case_when(
+                adm2_name %in% names(name_mapping) ~ name_mapping[adm2_name],
+                TRUE ~ tolower(adm2_name)
+            )
+        ) |>
+        dplyr::select(adm2_name, adm1_name, municipality_mapped, geometry)
+
+    tbilisi_geom <- georgia_admin1 |>
+        dplyr::filter(str_detect(tolower(adm1_name), "tbilisi")) |>
+        mutate(
+            adm2_name           = "Tbilisi",
+            municipality_mapped = "tbilisi"
+        ) |>
+        dplyr::select(adm2_name, adm1_name, municipality_mapped, geometry)
+
+  ## ── Combine and dissolve to one polygon per SVI municipality ─────────────
+    muni_boundaries <- bind_rows(georgia_admin2_mapped, tbilisi_geom) |>
+        group_by(municipality_mapped) |>
+        summarise(
+            geometry = sf::st_union(geometry),
+            .groups  = "drop"
+        ) |>
+        sf::st_make_valid()
+
+  ## ── Country outline for clipping and base-layer mapping ──────────────────
+    georgia_union <- sf::st_union(muni_boundaries)
+
+  ## ── Validation ───────────────────────────────────────────────────────────
+
+```
+
+```{r Load in Covariates}
+
+  # Define the directory path
+    covariate_dir <- "C:/Users/ianpsheasmith/Documents/GitHub/GVecVuln/data/Covariates/Monthly_Stacks"
+  
+    file_info <- tibble::tibble(
+        full_path = list.files(
+            covariate_dir,
+            pattern    = "\\.tif$",
+            full.names = TRUE,
+            recursive  = FALSE
+        )
+      ) |>
+      dplyr::mutate(
+        file_name  = basename(full_path),
+        file_size  = file.size(full_path)
+      ) |>
+      dplyr::filter(file_size > 0)    # drop any zero-byte / incomplete files
+
+  # Quick check
+    print(file_info$file_name)
+
+  # Separate files into three categories
+    monthly_files <- file_info |>
+      filter(
+        !str_detect(file_name, "Combined"),
+        !str_detect(file_name, "Baseline"),
+        !str_detect(file_name, "Static")
+      ) |>
+      arrange(file_name)
+  
+  baseline_file <- file_info |>
+    filter(str_detect(file_name, "Baseline"))
+  
+  static_file <- file_info |>
+    filter(str_detect(file_name, "Static"))
+  
+  # Load monthly rasters into a named list
+    monthly_rasters <- monthly_files$full_path |>
+      set_names(monthly_files$file_name |> str_remove("\\.tif$")) |>
+      map(rast)
+  
+  # Load baseline and static as separate objects
+    baseline_raster <- rast(baseline_file$full_path)
+    static_raster <- rast(static_file$full_path)
+    
+  # Extract layer information for monthly files
+    monthly_layer_info <- monthly_rasters |>
+      map_dfr(
+        \(r) tibble(
+          n_layers = nlyr(r),
+          layer_names = list(names(r))
+        ),
+        .id = "file"
+      )
+
+```
+
+```{r Test & Check for Swapped Lat/Lon and "Problem" Dates}
+## ── Replace the broken swap-detection chunk ──────────────────────────
+## Start from unified_vector_data_filtered (1,859 records) and use
+## the actual Georgia boundary for swap detection.
+
+  georgia_boundary <- sf::st_union(georgia_admin0)
+
+	## Build sf from the raw filtered data
+	uvc_sf <- unified_vector_data_filtered |>
+		dplyr::filter(!is.na(latitude) & !is.na(longitude)) |>
+		sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
+
+	inside_original <- as.logical(
+		sf::st_intersects(uvc_sf, georgia_boundary, sparse = FALSE)
+	)
+
+	outside_sf <- uvc_sf[!inside_original, ] |> sf::st_drop_geometry()
+
+	cat("  Total records:", nrow(uvc_sf), "\n")
+	cat("  Inside Georgia:", sum(inside_original), "\n")
+	cat("  Outside Georgia:", nrow(outside_sf), "\n")
+
+	## Test if swapping lat/lon fixes outside records
+	swap_test_sf <- outside_sf |>
+		sf::st_as_sf(coords = c("latitude", "longitude"), crs = 4326)
+
+	swap_fixes <- as.logical(
+		sf::st_intersects(swap_test_sf, georgia_boundary, sparse = FALSE)
+	)
+
+	cat("  Fixable by swap:", sum(swap_fixes, na.rm = TRUE), "\n")
+	cat("  Unfixable:", sum(!swap_fixes, na.rm = TRUE), "\n")
+
+	## Build swap key from the fixable records
+	swap_keys <- outside_sf[swap_fixes, ] |>
+		dplyr::mutate(key = paste(species, date, latitude, longitude)) |>
+		dplyr::pull(key)
+
+	## Create corrected dataset: swap where needed, then clip
+	unified_vector_data_corrected <- unified_vector_data_filtered |>
+		dplyr::mutate(
+			key = paste(species, date, latitude, longitude),
+			needs_swap = key %in% swap_keys,
+			lat_new = dplyr::if_else(needs_swap, longitude, latitude),
+			lon_new = dplyr::if_else(needs_swap, latitude, longitude),
+			latitude = lat_new,
+			longitude = lon_new
+		) |>
+		dplyr::select(-key, -needs_swap, -lat_new, -lon_new)
+
+	cat("  Swapped", length(swap_keys), "records\n")
+
+	## Clip: remove anything still outside after swapping
+	uvc_sf_final <- unified_vector_data_corrected |>
+		dplyr::filter(!is.na(latitude) & !is.na(longitude)) |>
+		sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
+
+	inside_final <- as.logical(
+		sf::st_intersects(uvc_sf_final, georgia_boundary, sparse = FALSE)
+	)
+
+	n_removed <- sum(!inside_final)
+	unified_vector_data_corrected <- uvc_sf_final[inside_final, ] |>
+		sf::st_drop_geometry()
+
+	cat(sprintf("  Final: %d records (%d swapped, %d removed as unfixable)\n",
+	            nrow(unified_vector_data_corrected),
+	            length(swap_keys), n_removed))
+
+	## Apply the same date corrections as the original chunk
+	PLACEHOLDER_SPECIES <- c("Aedes aegypti", "Aedes albopictus")
+	PRE2000_SPECIES     <- c("Culex tritaeniorhynchus", "Anopheles sacharovi")
+
+	unified_vector_data_corrected <- unified_vector_data_corrected |>
+		dplyr::mutate(
+			date = dplyr::case_when(
+				species %in% PLACEHOLDER_SPECIES &
+					lubridate::month(date) == 1L &
+					lubridate::mday(date)  == 1L          ~ as.Date(NA),
+				species %in% PRE2000_SPECIES &
+					!is.na(date) &
+					lubridate::year(date) < 2000           ~ as.Date(NA),
+				TRUE                                       ~ date
+			),
+			month_name = lubridate::month(date, label = TRUE, abbr = FALSE) |>
+				as.character()
+		)
+
+	## Clean up
+	rm(uvc_sf, uvc_sf_final, outside_sf, swap_test_sf,
+	   inside_original, inside_final, swap_fixes, swap_keys,
+	   georgia_boundary)
+	gc()
+```
+
+```{r Map the Presence Points}
+
+  # Define the updated target species list (deduplicated)
+    target_species <- c(
+      "Aedes aegypti", "Aedes albopictus", "Aedes geniculatus", "Aedes vexans",
+      "Culex pipiens", "Culex theileri", "Culex tritaeniorhynchus",
+      "Culiseta annulata",
+      "Anopheles sacharovi", "Anopheles maculipennis", "Anopheles plumbeus",
+      "Ixodes ricinus", "Dermacentor reticulatus", "Dermacentor marginatus",
+      "Haemaphysalis inermis", "Rhipicephalus sanguineus",
+      "Hyalomma marginatum", "Hyalomma aegyptium"
+    )
+  
+  # Convert Georgia shapefile to sf and build a single unioned boundary
+    # georgia_sf    <- st_as_sf(Georgia_adm2)
+    # georgia_union <- st_union(georgia_sf)
+  
+  # Filter to target species, build spatial object, clip to Georgia boundary
+    unified_vector_data_filtered <- unified_vector_data_corrected |>
+      dplyr::filter(
+        species %in% target_species,
+        !is.na(latitude),
+        !is.na(longitude)
+      ) |>
+      st_as_sf(
+        coords = c("longitude", "latitude"),
+        crs    = 4326,
+        remove = FALSE
+      ) |>
+      dplyr::filter(
+        as.logical(st_intersects(geometry, georgia_union, sparse = FALSE))
+      ) |>
+      dplyr::mutate(
+        month_name = format(date, "%B"),
+        year       = format(date, "%Y"),
+        popup_text = paste0(
+          "<b>Species:</b> ", species, "<br>",
+          "<b>Month:</b> ",   month_name, "<br>",
+          "<b>Year:</b> ",    year, "<br>",
+          "<b>Date:</b> ",    date, "<br>"
+        )
+      )
+  
+  # Build the species colour palette on the filtered list
+    species_list  <- sort(unique(unified_vector_data_filtered$species))
+    color_palette <- colorFactor(
+      palette = viridis(length(species_list)),
+      domain  = species_list
+    )
+  
+  # Initialise the leaflet map and add species layers via purrr::reduce()
+    occurence_int_map <- leaflet() |>
+      addProviderTiles(providers$CartoDB.Positron)
+  
+    occurence_int_map <- purrr::reduce(
+      species_list,
+      \(map_obj, sp) {
+        species_data <- unified_vector_data_filtered |>
+          dplyr::filter(species == sp)
+        map_obj |>
+          addCircleMarkers(
+            data        = species_data,
+            lng         = ~longitude,
+            lat         = ~latitude,
+            radius      = 5,
+            color       = ~color_palette(species),
+            fillOpacity = 0.7,
+            stroke      = TRUE,
+            weight      = 1,
+            popup       = ~popup_text,
+            group       = sp
+          )
+      },
+      .init = occurence_int_map
+    )
+  
+  # Add layer controls with italicised species labels via JS DOM manipulation
+    occurence_int_map <- occurence_int_map |>
+      addLayersControl(
+        overlayGroups = species_list,
+        options       = layersControlOptions(collapsed = FALSE)
+      ) |>
+      htmlwidgets::onRender("
+        function(el, x) {
+          var labels = el.querySelectorAll('.leaflet-control-layers-overlays label span');
+          labels.forEach(function(label, i) {
+            label.innerHTML = '<i>' + label.innerHTML + '</i>';
+          });
+        }
+      ")
+  
+  occurence_int_map
+
+  # Save the interactive map as a standalone HTML file
+    htmlwidgets::saveWidget(
+      widget = occurence_int_map,
+      file   = "C:/Users/ianpsheasmith/Documents/GitHub/GeorgiaVectors/Fig1.html",
+      selfcontained = TRUE
+    )
+```
+
+```{r Check spatiotemporal distributions}
+
+  # Calculate spatiotemporal metrics for each species
+    spatiotemporal_assessment <- unified_vector_data_corrected |>
+      dplyr::mutate(
+        year = lubridate::year(date),
+        month = format(date, "%m"),
+        year_month = format(date, "%Y-%m")
+      ) |>
+      dplyr::group_by(species) |>
+      dplyr::summarise(
+        total_records = n(),
+        unique_years = n_distinct(year),
+        unique_months = n_distinct(month),
+        unique_year_months = n_distinct(year_month),
+        unique_locations = n_distinct(paste(latitude, longitude)),
+        date_range_years = max(year) - min(year) + 1,
+        first_record = min(date),
+        last_record = max(date),
+        records_per_year = total_records / unique_years,
+        records_per_month = total_records / unique_months,
+        locations_per_year = unique_locations / unique_years,
+        .groups = "drop"
+      ) |>
+      dplyr::arrange(desc(total_records))
+  
+  # View the assessment
+    print(spatiotemporal_assessment, n = 22)
+  
+  # Calculate monthly coverage per species
+    monthly_coverage <- unified_vector_data_corrected |>
+      dplyr::mutate(
+        month = format(date, "%m"),
+        month_name = factor(
+          month.name[as.numeric(month)], 
+          levels = month.name
+        )
+      ) |>
+      dplyr::group_by(species, month, month_name) |>
+      dplyr::summarise(
+        n_records = n(),
+        n_locations = n_distinct(paste(latitude, longitude)),
+        n_years = n_distinct(format(date, "%Y")),
+        .groups = "drop"
+      )
+  
+  # Visualize monthly coverage across species
+    monthly_heatmap <- ggplot(monthly_coverage, 
+                              aes(x = month_name, y = species, fill = n_records)) +
+      geom_tile(color = "white") +
+      scale_fill_gradient(low = "#b3e0dc", high = "#025043", 
+                         trans = "log1p",
+                         name = "Records") +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 8)
+      ) +
+      labs(
+        title = "Monthly Record Distribution by Species",
+        x = "Month",
+        y = "Species"
+      )
+  
+    print(monthly_heatmap)
+  
+  # Calculate annual coverage per species
+    annual_coverage <- unified_vector_data_corrected |>
+      dplyr::mutate(year = lubridate::year(date)) |>
+      dplyr::group_by(species, year) |>
+      dplyr::summarise(
+        n_records = n(),
+        n_locations = n_distinct(paste(latitude, longitude)),
+        n_months = n_distinct(format(date, "%m")),
+        .groups = "drop"
+      )
+
+  # Visualize temporal coverage timeline
+    temporal_timeline <- ggplot(annual_coverage, 
+                               aes(x = year, y = species, size = n_records)) +
+      geom_point(alpha = 0.6, color = "#025043") +
+      scale_size_continuous(range = c(1, 8), name = "Records") +
+      theme_minimal() +
+      theme(axis.text.y = element_text(size = 8)) +
+      labs(
+        title = "Temporal Coverage by Species",
+        x = "Year",
+        y = "Species"
+      )
+  
+  print(temporal_timeline)
+
+```
+
+```{r Spatial thinning of presence points}
+	## Preserve pre-thinning counts for comparison
+	pre_thinning_counts <- unified_vector_data_corrected |>
+		dplyr::group_by(species) |>
+		dplyr::summarise(
+			n_pre = dplyr::n(),
+			.groups = "drop"
+		)
+
+	## Assign each record to a raster cell using the baseline covariate grid.
+	## cellFromXY() maps each lon/lat pair to its enclosing cell index at the
+	## ~1 km modeling resolution, ensuring thinning operates at the same scale
+	## as covariate extraction and prediction.
+	unified_vector_data_corrected <- unified_vector_data_corrected |>
+		dplyr::mutate(
+			cell_id = terra::cellFromXY(
+				baseline_raster,
+				cbind(longitude, latitude)
+			)
+		)
+
+	## Quick diagnostic: how many records fall outside the raster extent?
+	n_outside <- sum(is.na(unified_vector_data_corrected$cell_id))
+
+	if (n_outside > 0) {
+		cat("  NOTE:", n_outside, "records fall outside the baseline raster extent.\n")
+		cat("  These will be retained but could not be assigned a cell_id.\n\n")
+	}
+
+	## Split by temporal status, thin each partition, then recombine.
+	## Records WITH a month: one per species × cell × month preserves seasonal signal
+	records_with_month <- unified_vector_data_corrected |>
+		dplyr::filter(!is.na(month_name) & !is.na(cell_id)) |>
+		dplyr::distinct(species, cell_id, month_name, .keep_all = TRUE)
+
+	## Records WITHOUT a month (NA): one per species × cell (pure spatial dedup)
+	records_baseline <- unified_vector_data_corrected |>
+		dplyr::filter(is.na(month_name) & !is.na(cell_id)) |>
+		dplyr::distinct(species, cell_id, .keep_all = TRUE)
+
+	## Records outside raster extent: retain as-is (rare edge cases)
+	records_outside <- unified_vector_data_corrected |>
+		dplyr::filter(is.na(cell_id))
+
+	## Recombine and drop the temporary cell_id column
+	unified_vector_data_corrected <- dplyr::bind_rows(
+		records_with_month,
+		records_baseline,
+		records_outside
+	) |>
+		dplyr::select(-cell_id) |>
+		dplyr::arrange(species, date)
+
+	## Clean up partition objects
+	rm(records_with_month, records_baseline, records_outside)
 
 
-```{r Load Data}
+## ──────────────────────────────────────────────────────────────────────────────
+## Thinning summary: before vs after counts with tier assignment preview
+## ──────────────────────────────────────────────────────────────────────────────
 
-  # Load vector data
-    VectorData <- readxl::read_xlsx(
-      path = "C:/Users/ianpsheasmith/Documents/GitHub/GeorgiaVectors/data/Occurrence_Points/VectorData_w_Dates.xlsx",
-      col_types = c(
-        "text",      # species
-        "date",      # date
-        "numeric",   # count
-        "text",      # source
-        "numeric",   # latitude
-        "numeric",   # longitude
-        "text",      # month_name
-        "text",      # year
-        "text"       # popup_text
+	## Compute post-thinning counts and assign preliminary tiers
+	post_thinning_counts <- unified_vector_data_corrected |>
+		dplyr::group_by(species) |>
+		dplyr::summarise(
+			n_post = dplyr::n(),
+			.groups = "drop"
+		)
+
+	## Join pre and post, compute reduction, and assign tiers for both
+	thinning_summary <- pre_thinning_counts |>
+		dplyr::left_join(post_thinning_counts, by = "species") |>
+		dplyr::mutate(
+			n_removed   = n_pre - n_post,
+			pct_removed = round((n_removed / n_pre) * 100, 1),
+			## Tier assignments based on pre-thinning counts
+			tier_pre = dplyr::case_when(
+				n_pre < 10  ~ "Excluded",
+				n_pre <= 50 ~ "ESM",
+				n_pre <= 100 ~ "Tuned_BRT",
+				TRUE ~ "Standard_BRT"
+			),
+			## Tier assignments based on post-thinning counts
+			tier_post = dplyr::case_when(
+				n_post < 10  ~ "Excluded",
+				n_post <= 50 ~ "ESM",
+				n_post <= 100 ~ "Tuned_BRT",
+				TRUE ~ "Standard_BRT"
+			),
+			## Flag species whose tier changed
+			tier_changed = tier_pre != tier_post
+		) |>
+		dplyr::arrange(dplyr::desc(n_pre))
+	
+
+	thinning_summary |>
+		dplyr::select(species, n_pre, n_post, n_removed, pct_removed,
+		              tier_pre, tier_post, tier_changed) |>
+		print(n = Inf, width = Inf)
+
+	## Highlight any tier changes for manual review
+	tier_changes <- thinning_summary |>
+		dplyr::filter(tier_changed)
+
+	if (nrow(tier_changes) > 0) {
+		cat("\n  !! TIER CHANGES DETECTED -- review before proceeding:\n\n")
+		tier_changes |>
+			dplyr::mutate(
+				label = sprintf("    %-30s  %s (%d) -> %s (%d)",
+				                species, tier_pre, n_pre, tier_post, n_post)
+			) |>
+			dplyr::pull(label) |>
+			purrr::walk(cat, "\n")
+		cat("\n")
+	} else {
+		cat("\n  No tier changes from thinning.\n")
+	}
+
+	## Report overall reduction
+	cat(sprintf("\n  Total records:  %d -> %d  (%.1f%% reduction)\n",
+	            sum(thinning_summary$n_pre),
+	            sum(thinning_summary$n_post),
+	            (1 - sum(thinning_summary$n_post) / sum(thinning_summary$n_pre)) * 100))
+
+	## Clean up summary objects (thinning_summary retained for reference)
+	rm(pre_thinning_counts, post_thinning_counts, tier_changes)	
+```
+
+```{r Define PA Generation & Cov Extraction Functions}
+
+  # Projected CRS for Georgia - UTM Zone 38N, used for accurate metric buffering
+    CRS_PROJECTED <- "EPSG:32638"
+    CRS_WGS84     <- "EPSG:4326"
+
+  #' Generate Pseudo-Absences for a Single Species
+  #'
+  #' Samples background points from the valid (non-NA) extent of a reference
+  #' raster, excluding a buffer around all known presence locations. Points are
+  #' distributed proportionally across the species' observed months so that
+  #' monthly covariate extraction is temporally matched. Records with no
+  #' date (NA month) are assigned to the baseline raster at extraction time.
+  #'
+  #' @param species_name  Character. Species label attached to output rows.
+  #' @param species_data  Data frame. Presence records with longitude/latitude.
+  #' @param n_pas         Integer. Number of pseudo-absences to generate.
+  #' @param buffer_km     Numeric. Exclusion buffer radius around presences (km).
+  #' @param observed_months Character vector. Months observed for this species.
+  #' @param extent_mask   SpatRaster. Template raster defining valid sampling domain.
+  #' @return Tibble with columns: species, longitude, latitude, month_name, presence.
+
+    generate_species_pseudo_absences <- function(species_name,
+                                                 species_data,
+                                                 n_pas,
+                                                 buffer_km,
+                                                 observed_months,
+                                                 extent_mask) {
+
+      buffer_m <- buffer_km * 1000
+
+      # Convert valid raster cells to a sampling polygon, projected for buffering
+        valid_mask   <- !is.na(extent_mask)
+        valid_polys  <- terra::as.polygons(valid_mask) |>
+          sf::st_as_sf() |>
+          dplyr::filter(dplyr::across(1, ~ .x == 1)) |>
+          sf::st_union() |>
+          sf::st_transform(CRS_PROJECTED)
+
+      # Build exclusion zone: union of buffered presence points
+        presence_sf <- species_data |>
+          dplyr::filter(!is.na(longitude) & !is.na(latitude)) |>
+          sf::st_as_sf(coords = c("longitude", "latitude"), crs = CRS_WGS84) |>
+          sf::st_transform(CRS_PROJECTED)
+
+        exclusion_zone <- presence_sf |>
+          sf::st_buffer(dist = buffer_m) |>
+          sf::st_union()
+
+      # Subtract exclusion zone from valid sampling area
+        available_area <- sf::st_difference(valid_polys, exclusion_zone)
+
+        if (length(available_area) == 0 || sf::st_is_empty(available_area)) {
+          warning("No valid sampling area remains after buffer exclusion for: ", species_name)
+          return(tibble::tibble(
+            species    = character(),
+            longitude  = numeric(),
+            latitude   = numeric(),
+            month_name = character(),
+            presence   = integer()
+          ))
+        }
+
+      # Assign months proportionally across observed months.
+      # If no months are observed (all baseline records), all PAs get NA month.
+        if (length(observed_months) == 0) {
+          month_assignments <- rep(NA_character_, n_pas)
+        } else {
+          month_counts      <- rep(floor(n_pas / length(observed_months)), length(observed_months))
+          remainder         <- n_pas - sum(month_counts)
+          month_counts[seq_len(remainder)] <- month_counts[seq_len(remainder)] + 1L
+          month_assignments <- rep(observed_months, times = month_counts) |>
+            sample()   # shuffle so months aren't block-ordered
+        }
+
+      # Sample random points within available area; oversample then trim
+        n_sample <- ceiling(n_pas * 1.5)
+
+        sampled_pts <- sf::st_sample(available_area, size = n_sample, type = "random") |>
+          sf::st_as_sf() |>
+          dplyr::slice_head(n = n_pas) |>
+          sf::st_transform(CRS_WGS84) |>
+          dplyr::mutate(
+            longitude  = sf::st_coordinates(x)[, 1],
+            latitude   = sf::st_coordinates(x)[, 2]
+          ) |>
+          sf::st_drop_geometry()
+
+      # Attach species label, month assignments, and presence = 0
+        sampled_pts |>
+          dplyr::mutate(
+            species    = species_name,
+            month_name = month_assignments[seq_len(nrow(sampled_pts))],
+            presence   = 0L
+          ) |>
+          dplyr::select(species, longitude, latitude, month_name, presence)
+    }
+    
+  # Categorical layers requiring majority extraction rather than mean
+    CATEGORICAL_LAYERS <- "WorldCover"
+
+  #' Extract Covariates for a Single Point Using a Circular Buffer
+  #'
+  #' Determines the appropriate raster (monthly or baseline) from the record's
+  #' month, creates a circular buffer around the point, and extracts covariate
+  #' values using mean for continuous layers and majority for WorldCover.
+  #' Falls back to baseline_raster for any record with NA or unrecognised month.
+  #'
+  #' @param longitude  Numeric. WGS84 longitude.
+  #' @param latitude   Numeric. WGS84 latitude.
+  #' @param month_name Character. Full month name (e.g. "July") or NA.
+  #' @param buffer_m   Numeric. Buffer radius in metres (default 1000).
+  #' @return Single-row data frame of extracted covariate values.
+
+    extract_covariates_for_record_buffered <- function(longitude,
+                                                           latitude,
+                                                           month_name,
+                                                           buffer_m = 1000) {
+    
+          # Select monthly or baseline raster
+            raster_to_use <- if (!is.na(month_name) && month_name %in% names(month_to_raster)) {
+              month_to_raster[[month_name]]
+            } else {
+              baseline_raster
+            }
+    
+          # Build a 1km circular buffer, projected to UTM 38N for accurate metric
+          # distances, then transformed back to match the raster CRS
+            point_sf <- sf::st_as_sf(
+                data.frame(x = longitude, y = latitude),
+                coords = c("x", "y"),
+                crs    = CRS_WGS84
+              ) |>
+              sf::st_transform(CRS_PROJECTED) |>
+              sf::st_buffer(dist = buffer_m) |>
+              sf::st_transform(sf::st_crs(raster_to_use))
+    
+          # Partition layer names into continuous and categorical
+            layer_names      <- names(raster_to_use)
+            categorical_here <- intersect(CATEGORICAL_LAYERS, layer_names)
+            continuous_here  <- setdiff(layer_names, categorical_here)
+    
+          # Extract continuous layers (mean); exact_extract returns a data frame
+          # when given a multi-layer raster
+            continuous_vals <- if (length(continuous_here) > 0) {
+              exactextractr::exact_extract(
+                raster_to_use[[continuous_here]],
+                point_sf,
+                fun      = "mean",
+                progress = FALSE
+              ) |>
+                as.data.frame() |>
+                dplyr::rename_with(~ stringr::str_remove(.x, "^mean\\."))
+            } else {
+              data.frame()
+            }
+    
+          # Extract categorical layers (majority)
+            categorical_vals <- if (length(categorical_here) > 0) {
+              raw <- exactextractr::exact_extract(
+                raster_to_use[[categorical_here]],
+                point_sf,
+                fun      = "majority",
+                progress = FALSE
+              )
+
+              if (!is.data.frame(raw)) {
+                raw <- stats::setNames(data.frame(raw), paste0("majority.", categorical_here))
+              }
+              raw |>
+                as.data.frame() |>
+                dplyr::rename_with(~ stringr::str_remove(.x, "^majority\\."))
+            } else {
+              data.frame()
+            }
+    
+          dplyr::bind_cols(continuous_vals, categorical_vals)
+        }
+```
+
+```{r Pseudo-absence generatio}
+
+  # Set species parameters for PA generation
+    species_modeling_params <- unified_vector_data_corrected |>
+      dplyr::group_by(species) |>
+      dplyr::summarise(
+        n_occurrences = n(),
+        n_unique_locations = n_distinct(paste(latitude, longitude)),
+        # Extract unique months, excluding NA
+          observed_months = list(unique(month_name[!is.na(month_name)])),
+          n_months_observed = length(unique(month_name[!is.na(month_name)])),
+          n_records_with_month = sum(!is.na(month_name)),
+          n_records_baseline = sum(is.na(month_name))
+      ) |>
+      dplyr::filter(n_occurrences >= 10) |>  # Drop very low-n species
+      dplyr::mutate(
+        # Determine modeling approach
+          modeling_approach = dplyr::case_when(
+            n_occurrences <= 50 ~ "ESM",
+            n_occurrences <= 100 ~ "Tuned_BRT",
+            TRUE ~ "Standard_BRT"
+          ),
+        # Number of pseudo-absences to generate
+        n_pseudo_absences = dplyr::case_when(
+          modeling_approach == "ESM" ~ 10000L,
+          TRUE ~ as.integer(n_occurrences)  # 1:1 for BRTs
+        ),
+        # PA 10K buffer
+          pa_buffer_km = 10
+      )
+    
+    print(species_modeling_params, n = Inf)
+
+  # Extract study extent from baseline raster
+    georgia_extent <- ext(baseline_raster)
+    georgia_mask <- baseline_raster[[1]]  # Use first layer as template
+    georgia_mask[!is.na(georgia_mask)] <- 1
+
+  # Generate the pseudo-absences 
+    species_params_list <- species_modeling_params |>
+      dplyr::mutate(
+        # Convert observed_months list column to a format pmap can handle
+          observed_months_vec = purrr::map(observed_months, ~.x)
+      ) |>
+      dplyr::select(
+        species, 
+        n_pseudo_absences, 
+        pa_buffer_km, 
+        observed_months_vec
+      )
+    
+  # Generate the pseudo-absences 
+    pseudo_absences_list <- purrr::pmap_dfr(
+      list(
+        species_name = species_params_list$species,
+        n_pas = species_params_list$n_pseudo_absences,
+        buffer_km = species_params_list$pa_buffer_km,
+        observed_months = species_params_list$observed_months_vec
+      ),
+      function(species_name, n_pas, buffer_km, observed_months) {
+        
+        cat("  Processing:", species_name, "\n")
+        
+        # Filter data for this species
+        species_data <- unified_vector_data_corrected |>
+          dplyr::filter(species == species_name)
+        
+        # Generate PAs
+        pas <- generate_species_pseudo_absences(
+          species_name = species_name,
+          species_data = species_data,
+          n_pas = n_pas,
+          buffer_km = buffer_km,
+          observed_months = observed_months,
+          extent_mask = georgia_mask
+        )
+        
+        return(pas)
+      }
+    )
+    
+  pseudo_absences_list |>
+    dplyr::group_by(species) |>
+    dplyr::summarise(
+      n_pas = n(),
+      n_months = n_distinct(month_name, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    print(n = Inf)    
+```
+
+```{r Meerge Psuedo-absences w/ Occurrence Points}
+
+  # Format presence data to match PA structure
+    presences_formatted <- unified_vector_data_corrected |>
+      dplyr::filter(species %in% species_modeling_params$species) |>
+      dplyr::select(species, longitude, latitude, month_name) |>
+      dplyr::mutate(presence = 1)
+  
+  # Combine presences and pseudo-absences
+    combined_pa_presence <- dplyr::bind_rows(
+      presences_formatted,
+      pseudo_absences_list
+    ) |>
+      dplyr::arrange(species, dplyr::desc(presence))
+  
+  # Summary statistics
+    pa_summary <- combined_pa_presence |>
+      dplyr::group_by(species, presence) |>
+      dplyr::summarise(
+        n = n(),
+        n_with_month = sum(!is.na(month_name)),
+        n_baseline = sum(is.na(month_name)),
+        .groups = "drop"
+      ) |>
+      tidyr::pivot_wider(
+        names_from = presence,
+        values_from = c(n, n_with_month, n_baseline),
+        names_sep = "_"
+      )
+    
+    print(pa_summary, n = Inf)
+
+```
+
+```{r Extract Covariates}
+
+  # Map month names to monthly raster objects
+    month_to_raster <- list(
+      "January" = monthly_rasters$Georgia_Covariates_Jan,
+      "February" = monthly_rasters$Georgia_Covariates_Feb,
+      "March" = monthly_rasters$Georgia_Covariates_Mar,
+      "April" = monthly_rasters$Georgia_Covariates_Apr,
+      "May" = monthly_rasters$Georgia_Covariates_May,
+      "June" = monthly_rasters$Georgia_Covariates_Jun,
+      "July" = monthly_rasters$Georgia_Covariates_Jul,
+      "August" = monthly_rasters$Georgia_Covariates_Aug,
+      "September" = monthly_rasters$Georgia_Covariates_Sep,
+      "October" = monthly_rasters$Georgia_Covariates_Oct,
+      "November" = monthly_rasters$Georgia_Covariates_Nov,
+      "December" = monthly_rasters$Georgia_Covariates_Dec
+    )
+  
+
+
+  # Function to extract covariates for a single record
+    extract_covariates_for_record <- function(longitude, latitude, month_name) {
+      
+      # Convert to spatial point
+      point <- terra::vect(
+        data.frame(x = longitude, y = latitude),
+        geom = c("x", "y"),
+        crs = "EPSG:4326"
+      )
+      
+      # Determine which raster to use
+      if (is.na(month_name) || !month_name %in% names(month_to_raster)) {
+        raster_to_use <- baseline_raster
+      } else {
+        raster_to_use <- month_to_raster[[month_name]]
+      }
+      
+      # Extract values
+      extracted_values <- terra::extract(raster_to_use, point, ID = FALSE)
+      
+      return(as.data.frame(extracted_values))
+    }
+
+  combined_pa_presence_with_covariates <- combined_pa_presence |>
+    dplyr::mutate(
+      covariates = purrr::pmap(
+        list(longitude, latitude, month_name),
+        ~extract_covariates_for_record_buffered(..1, ..2, ..3, buffer_m = 1000)
+      )
+    ) |>
+    tidyr::unnest(covariates)
+
+  # Check for any NA extractions
+    na_check <- combined_pa_presence_with_covariates |>
+      dplyr::summarise(
+        dplyr::across(
+          hurs:WorldCover,
+          ~sum(is.na(.x))
+        )
+      )    
+```
+
+```{r Generate the 100 PAs}
+
+  # Filter for BRT species that need multiple PA sets
+    brt_species <- species_modeling_params |>
+      dplyr::filter(modeling_approach %in% c("Standard_BRT", "Tuned_BRT")) |>
+      dplyr::mutate(
+        # Convert observed_months list column to a format pmap can handle
+          observed_months_vec = purrr::map(observed_months, ~.x)
+      )
+  
+  # Define output directory
+    output_dir <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_BRTs_New/PA_Iterations"
+    dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  
+  # Generate and save 100 PA sets for each BRT species
+    purrr::walk(
+      1:100,
+      function(iteration) {
+        # Set unique seed for this iteration
+          set.seed(1000 + iteration)
+        
+        # Generate PAs for all BRT species in this iteration
+          iteration_pas <- purrr::pmap_dfr(
+            list(
+              species_name = brt_species$species,
+              n_pas = brt_species$n_pseudo_absences,
+              buffer_km = brt_species$pa_buffer_km,
+              observed_months = brt_species$observed_months_vec
+            ),
+            function(species_name, n_pas, buffer_km, observed_months) {
+              
+              # Filter data for this species
+                species_data <- unified_vector_data_corrected |>
+                  dplyr::filter(species == species_name)
+              
+              # Generate PAs (with monthly distribution)
+                pas <- generate_species_pseudo_absences(
+                  species_name = species_name,
+                  species_data = species_data,
+                  n_pas = n_pas,
+                  buffer_km = buffer_km,
+                  observed_months = observed_months,
+                  extent_mask = georgia_mask
+                )
+              
+              return(pas)
+            }
+        ) |>
+          dplyr::mutate(pa_iteration = iteration)
+        
+        # Save this iteration to disk
+        saveRDS(
+          iteration_pas,
+          file = file.path(output_dir, paste0("brt_pas_iteration_", sprintf("%03d", iteration), ".rds"))
+        )
+      }
+    )
+  
+  # Verify files were created
+    created_files <- list.files(output_dir, pattern = "^brt_pas_iteration_.*\\.rds$", full.names = TRUE)
+```
+
+```{r BRT 100 PA Sets Covariate Extraction}
+
+  # Extract covariates for each BRT iteration
+    purrr::walk(
+      1:100,
+      function(iteration) {
+        # Load this iteration's PAs
+          iteration_file <- file.path(output_dir, paste0("brt_pas_iteration_", sprintf("%03d", iteration), ".rds"))
+          iteration_pas <- readRDS(iteration_file)
+        
+        # Format presence data for BRT species only
+          presences_formatted <- unified_vector_data_corrected |>
+            dplyr::filter(species %in% brt_species$species) |>
+            dplyr::select(species, longitude, latitude, month_name) |>
+            dplyr::mutate(
+              presence = 1,
+              pa_iteration = iteration
+            )
+        
+        # Combine presences and pseudo-absences for this iteration
+          combined_iteration <- dplyr::bind_rows(
+            presences_formatted,
+            iteration_pas
+          ) |>
+            dplyr::arrange(species, dplyr::desc(presence))
+        
+        # Extract covariates
+          combined_with_covariates <- combined_iteration |>
+            dplyr::mutate(
+              covariates = purrr::pmap(
+                list(longitude, latitude, month_name),
+                ~extract_covariates_for_record_buffered(..1, ..2, ..3, buffer_m = 1000)
+              )
+            ) |>
+            tidyr::unnest(covariates)
+        
+        # Save the complete dataset with covariates
+          saveRDS(
+            combined_with_covariates,
+            file = file.path(output_dir, paste0("brt_data_iteration_", sprintf("%03d", iteration), ".rds"))
+          )
+        
+        # Clean up to free memory
+          rm(iteration_pas, combined_iteration, combined_with_covariates)
+          gc()
+      }
+    )
+  
+
+```
+
+```{r Collinearity Assessment — Taxon-Level VIF}
+
+## ──────────────────────────────────────────────────────────────────────────────
+## Variance Inflation Factor (VIF) assessment at the taxon level.
+##
+## Computes pairwise Pearson correlations and stepwise VIF for the full
+## candidate predictor set for each taxon group (mosquitoes and ticks),
+## removing the highest-VIF variable iteratively until all VIF < 10.
+## WorldCover (categorical) is excluded from VIF computation but retained
+## in the final predictor sets regardless.
+##
+## Uses extracted covariate values at all presence + pseudo-absence locations
+## from `combined_pa_presence_with_covariates` to characterise the
+## correlation structure across the full modeled environmental space.
+##
+## Output objects:
+##   MOSQUITO_VARS_FINAL — reduced continuous predictors + WorldCover
+##   TICK_VARS_FINAL     — reduced continuous predictors + WorldCover
+##   vif_results_summary — full diagnostic tibble for methods reporting
+## ──────────────────────────────────────────────────────────────────────────────
+
+## ── Species-to-taxon classification ──────────────────────────────────────────
+
+	ALL_MOSQUITO_SPECIES <- c(
+		"Aedes aegypti", "Aedes albopictus", "Aedes caspius",
+		"Aedes geniculatus", "Aedes vexans",
+		"Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
+		"Culex pipiens", "Culex theileri", "Culex tritaeniorhynchus",
+		"Culiseta annulata", "Culiseta longiareolata"
+	)
+
+	ALL_TICK_SPECIES <- c(
+		"Dermacentor marginatus", "Dermacentor reticulatus",
+		"Haemaphysalis inermis",
+		"Hyalomma aegyptium", "Hyalomma marginatum",
+		"Ixodes ricinus",
+		"Rhipicephalus sanguineus"
+	)
+
+## ── Candidate predictor sets (continuous only; WorldCover handled separately)
+
+	MOSQUITO_CONTINUOUS <- c(
+		"hurs", "pr", "sfcWind", "tas", "tasmax", "tasmin",
+		"NDVI", "Elevation", "Slope"
+	)
+
+	TICK_CONTINUOUS <- c(
+		"hurs", "pr", "tas", "tasmax", "tasmin",
+		"NDVI", "Elevation", "Slope",
+		"BulkDensity", "CoarseFragments", "Nitrogen",
+		"SoilpH", "SandContent", "SiltContent", "SoilOrganicCarbon"
+	)
+
+	CATEGORICAL_VAR <- "WorldCover"
+
+
+## ── VIF helper functions ─────────────────────────────────────────────────────
+
+	#' Compute VIF for all columns in a data frame of continuous predictors.
+	#' VIF_j = 1 / (1 - R²_j), where R²_j is from regressing variable j
+	#' on all remaining variables.
+	compute_vif <- function(data) {
+		vars <- names(data)
+		purrr::map_dfr(vars, function(v) {
+			fml <- as.formula(paste(v, "~ ."))
+			r2  <- summary(stats::lm(fml, data = data))$r.squared
+			tibble::tibble(variable = v, vif = 1 / (1 - r2), r_squared = r2)
+		}) |>
+			dplyr::arrange(dplyr::desc(vif))
+	}
+
+	#' Stepwise VIF removal: iteratively drop the highest-VIF variable
+	#' until all remaining variables have VIF below the threshold.
+	#' Returns the retained set, removal order, and final VIF table.
+	stepwise_vif <- function(data, threshold = 10, verbose = TRUE) {
+
+		current_data <- data
+		removal_log  <- tibble::tibble(
+			step     = integer(),
+			removed  = character(),
+			vif_at_removal = numeric()
+		)
+
+		step <- 0L
+
+		repeat {
+			vif_table <- compute_vif(current_data)
+			max_vif   <- max(vif_table$vif)
+
+			if (max_vif < threshold) break
+
+			step <- step + 1L
+			worst_var <- vif_table$variable[which.max(vif_table$vif)]
+			worst_vif <- max_vif
+
+			removal_log <- dplyr::bind_rows(
+				removal_log,
+				tibble::tibble(
+					step = step, removed = worst_var, vif_at_removal = worst_vif
+				)
+			)
+
+			if (verbose) {
+				cat(sprintf("    Step %d: removed %-20s (VIF = %.1f)\n",
+				            step, worst_var, worst_vif))
+			}
+
+			current_data <- current_data |>
+				dplyr::select(-dplyr::all_of(worst_var))
+		}
+
+		list(
+			retained    = names(current_data),
+			removed     = removal_log,
+			final_vif   = compute_vif(current_data),
+			n_removed   = nrow(removal_log)
+		)
+	}
+
+
+## ── Extract covariate matrices by taxon ──────────────────────────────────────
+
+	## Mosquito records (presence + PA) — continuous predictors only
+	mosquito_cov_matrix <- combined_pa_presence_with_covariates |>
+		dplyr::filter(species %in% ALL_MOSQUITO_SPECIES) |>
+		dplyr::select(dplyr::all_of(MOSQUITO_CONTINUOUS)) |>
+		tidyr::drop_na()
+
+	## Tick records (presence + PA) — continuous predictors only
+	tick_cov_matrix <- combined_pa_presence_with_covariates |>
+		dplyr::filter(species %in% ALL_TICK_SPECIES) |>
+		dplyr::select(dplyr::all_of(TICK_CONTINUOUS)) |>
+		tidyr::drop_na()
+
+	cat("  Mosquito covariate matrix:", nrow(mosquito_cov_matrix), "records x",
+	    ncol(mosquito_cov_matrix), "continuous predictors\n")
+	cat("  Tick covariate matrix:    ", nrow(tick_cov_matrix), "records x",
+	    ncol(tick_cov_matrix), "continuous predictors\n\n")
+
+
+## ── Pairwise Pearson correlations ────────────────────────────────────────────
+
+	cat("===================================================================\n")
+	cat("  PAIRWISE PEARSON CORRELATIONS\n")
+	cat("===================================================================\n\n")
+
+	## Mosquito correlations — flag pairs with |r| > 0.7
+	mosquito_cor <- cor(mosquito_cov_matrix, use = "complete.obs")
+
+	mosquito_high_cor <- mosquito_cor |>
+		as.data.frame() |>
+		tibble::rownames_to_column("var1") |>
+		tidyr::pivot_longer(-var1, names_to = "var2", values_to = "r") |>
+		dplyr::filter(var1 < var2, abs(r) > 0.7) |>
+		dplyr::arrange(dplyr::desc(abs(r)))
+
+	cat("  MOSQUITOES — pairs with |r| > 0.7:\n")
+	if (nrow(mosquito_high_cor) == 0) {
+		cat("    None\n\n")
+	} else {
+		purrr::pwalk(mosquito_high_cor, function(var1, var2, r) {
+			cat(sprintf("    %-15s × %-15s  r = %+.3f\n", var1, var2, r))
+		})
+		cat("\n")
+	}
+
+	## Tick correlations — flag pairs with |r| > 0.7
+	tick_cor <- cor(tick_cov_matrix, use = "complete.obs")
+
+	tick_high_cor <- tick_cor |>
+		as.data.frame() |>
+		tibble::rownames_to_column("var1") |>
+		tidyr::pivot_longer(-var1, names_to = "var2", values_to = "r") |>
+		dplyr::filter(var1 < var2, abs(r) > 0.7) |>
+		dplyr::arrange(dplyr::desc(abs(r)))
+
+	cat("  TICKS — pairs with |r| > 0.7:\n")
+	if (nrow(tick_high_cor) == 0) {
+		cat("    None\n\n")
+	} else {
+		purrr::pwalk(tick_high_cor, function(var1, var2, r) {
+			cat(sprintf("    %-15s × %-15s  r = %+.3f\n", var1, var2, r))
+		})
+		cat("\n")
+	}
+
+
+## ── Stepwise VIF (threshold = 10) ───────────────────────────────────────────
+
+	cat("\n===================================================================\n")
+	cat("  STEPWISE VIF REMOVAL (threshold = 10)\n")
+	cat("===================================================================\n\n")
+
+	## -- Mosquitoes --
+	cat("  MOSQUITOES:\n")
+	cat("  Initial predictors:", paste(MOSQUITO_CONTINUOUS, collapse = ", "), "\n\n")
+
+	mosquito_vif_result <- stepwise_vif(mosquito_cov_matrix, threshold = 10)
+
+	if (mosquito_vif_result$n_removed == 0) {
+		cat("    No variables exceeded VIF = 10; all retained.\n")
+	}
+
+	cat("\n  Final mosquito VIF values:\n")
+	purrr::pwalk(mosquito_vif_result$final_vif, function(variable, vif, r_squared) {
+		cat(sprintf("    %-20s  VIF = %6.2f  (R² = %.3f)\n",
+		            variable, vif, r_squared))
+	})
+
+	## -- Ticks --
+	cat("\n\n  TICKS:\n")
+	cat("  Initial predictors:", paste(TICK_CONTINUOUS, collapse = ", "), "\n\n")
+
+	tick_vif_result <- stepwise_vif(tick_cov_matrix, threshold = 10)
+
+	if (tick_vif_result$n_removed == 0) {
+		cat("    No variables exceeded VIF = 10; all retained.\n")
+	}
+
+	cat("\n  Final tick VIF values:\n")
+	purrr::pwalk(tick_vif_result$final_vif, function(variable, vif, r_squared) {
+		cat(sprintf("    %-20s  VIF = %6.2f  (R² = %.3f)\n",
+		            variable, vif, r_squared))
+	})
+
+
+## ── Define final predictor sets (append WorldCover back in) ──────────────────
+
+	MOSQUITO_VARS_FINAL <- c(mosquito_vif_result$retained, CATEGORICAL_VAR)
+	TICK_VARS_FINAL     <- c(tick_vif_result$retained, CATEGORICAL_VAR)
+
+	cat("\n\n===================================================================\n")
+	cat("  FINAL PREDICTOR SETS\n")
+	cat("===================================================================\n\n")
+
+	cat("  Mosquitoes (", length(MOSQUITO_VARS_FINAL), "vars ):\n")
+	cat("   ", paste(MOSQUITO_VARS_FINAL, collapse = ", "), "\n\n")
+
+	cat("  Ticks (", length(TICK_VARS_FINAL), "vars ):\n")
+	cat("   ", paste(TICK_VARS_FINAL, collapse = ", "), "\n\n")
+
+	## Report what was removed from each taxon
+	if (mosquito_vif_result$n_removed > 0) {
+		cat("  Removed from mosquitoes:",
+		    paste(mosquito_vif_result$removed$removed, collapse = ", "), "\n")
+	}
+	if (tick_vif_result$n_removed > 0) {
+		cat("  Removed from ticks:     ",
+		    paste(tick_vif_result$removed$removed, collapse = ", "), "\n")
+	}
+
+
+## ── Species-level VIF verification ───────────────────────────────────────────
+## Confirm that no individual species has residual VIF > 10 under the
+## taxon-level reduced predictor set. This catches edge cases where a
+## species' spatial distribution produces unusual local correlations.
+
+	cat("\n\n===================================================================\n")
+	cat("  SPECIES-LEVEL VIF VERIFICATION (reduced predictor sets)\n")
+	cat("===================================================================\n\n")
+
+	## Get species actually in the modeling pipeline
+	modeled_species <- unique(combined_pa_presence_with_covariates$species)
+
+	species_vif_check <- purrr::map_dfr(modeled_species, function(sp) {
+
+		## Determine taxon and select appropriate reduced predictor set
+		if (sp %in% ALL_MOSQUITO_SPECIES) {
+			cont_vars <- setdiff(MOSQUITO_VARS_FINAL, CATEGORICAL_VAR)
+			taxon <- "mosquito"
+		} else if (sp %in% ALL_TICK_SPECIES) {
+			cont_vars <- setdiff(TICK_VARS_FINAL, CATEGORICAL_VAR)
+			taxon <- "tick"
+		} else {
+			return(tibble::tibble())
+		}
+
+		## Extract this species' covariate values (presence + PA)
+		sp_cov <- combined_pa_presence_with_covariates |>
+			dplyr::filter(species == sp) |>
+			dplyr::select(dplyr::all_of(cont_vars)) |>
+			tidyr::drop_na()
+
+		## Need at least n > p for VIF to be computable
+		if (nrow(sp_cov) <= length(cont_vars)) {
+			return(tibble::tibble(
+				species = sp, taxon = taxon,
+				max_vif = NA_real_, flagged = NA
+			))
+		}
+
+		sp_vif <- compute_vif(sp_cov)
+
+		tibble::tibble(
+			species  = sp,
+			taxon    = taxon,
+			max_vif  = max(sp_vif$vif),
+			flagged  = max(sp_vif$vif) >= 10
+		)
+	})
+
+	species_vif_check |>
+		dplyr::arrange(taxon, dplyr::desc(max_vif)) |>
+		dplyr::mutate(
+			label = sprintf("  %-30s  %-10s  max VIF = %6.2f  %s",
+			                species, taxon, max_vif,
+			                dplyr::if_else(flagged, "!! FLAG", ""))
+		) |>
+		dplyr::pull(label) |>
+		purrr::walk(cat, "\n")
+
+## ── Compile summary for methods reporting ────────────────────────────────────
+
+	vif_results_summary <- list(
+		mosquito = list(
+			initial_vars   = MOSQUITO_CONTINUOUS,
+			final_vars     = MOSQUITO_VARS_FINAL,
+			removed        = mosquito_vif_result$removed,
+			final_vif      = mosquito_vif_result$final_vif,
+			cor_matrix     = mosquito_cor,
+			high_cor_pairs = mosquito_high_cor
+		),
+		tick = list(
+			initial_vars   = TICK_CONTINUOUS,
+			final_vars     = TICK_VARS_FINAL,
+			removed        = tick_vif_result$removed,
+			final_vif      = tick_vif_result$final_vif,
+			cor_matrix     = tick_cor,
+			high_cor_pairs = tick_high_cor
+		),
+		species_verification = species_vif_check,
+		threshold_used       = 10
+	)
+
+	## Persist for use in downstream modeling chunks and methods reporting
+	VIF_SAVE_DIR <- file.path(
+		"C:/Users/ianpsheasmith/OneDrive - University of Florida",
+		"General - Georgia Ticks/Georgia_Ticks/Paper2_Data/Summaries"
+	)
+	dir.create(VIF_SAVE_DIR, showWarnings = FALSE, recursive = TRUE)
+
+	saveRDS(
+		vif_results_summary,
+		file = file.path(VIF_SAVE_DIR, "vif_collinearity_assessment.rds")
+	)
+
+	cat("\n  Saved:", file.path(VIF_SAVE_DIR, "vif_collinearity_assessment.rds"), "\n")
+
+
+## ── Clean up intermediates ───────────────────────────────────────────────────
+
+	rm(mosquito_cov_matrix, tick_cov_matrix,
+	   mosquito_cor, tick_cor,
+	   mosquito_high_cor, tick_high_cor,
+	   mosquito_vif_result, tick_vif_result,
+	   species_vif_check, modeled_species,
+	   compute_vif, stepwise_vif, VIF_SAVE_DIR)
+	gc()
+
+```
+
+```{r Spatial CV Fold Generation}
+
+## ──────────────────────────────────────────────────────────────────────────────
+## Generate species-specific spatial cross-validation folds using blockCV.
+##
+## For each species:
+##   1. Estimate the spatial autocorrelation range from the binary response
+##      variable via sample variogram (cv_spatial_autocor on response only,
+##      not the full raster stack, to avoid memory overflow)
+##   2. Generate spatially blocked fold assignments via cv_spatial
+##   3. Verify fold balance — if any fold has 0 presences, iteratively
+##      reduce block size, then fall back to environmental clustering
+##
+## Fold counts:
+##   Standard BRT (>100 presences):  10 folds
+##   Tuned BRT / ESM (≤100):          5 folds
+## ──────────────────────────────────────────────────────────────────────────────
+
+	if (!requireNamespace("blockCV", quietly = TRUE)) {
+		stop("Package 'blockCV' is required. Install with: ",
+		     "install.packages('blockCV')")
+	}
+	library(blockCV)
+
+	set.seed(1999)
+
+
+## ── Species-to-taxon classification ──────────────────────────────────────────
+
+	ALL_MOSQUITO_SPECIES <- c(
+		"Aedes aegypti", "Aedes albopictus", "Aedes caspius",
+		"Aedes geniculatus", "Aedes vexans",
+		"Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
+		"Culex pipiens", "Culex theileri", "Culex tritaeniorhynchus",
+		"Culiseta annulata", "Culiseta longiareolata"
+	)
+
+	ALL_TICK_SPECIES <- c(
+		"Dermacentor marginatus", "Dermacentor reticulatus",
+		"Haemaphysalis inermis",
+		"Hyalomma aegyptium", "Hyalomma marginatum",
+		"Ixodes ricinus",
+		"Rhipicephalus sanguineus"
+	)
+
+
+## ── Helper: check fold balance ───────────────────────────────────────────────
+
+	check_fold_balance <- function(presence_vec, fold_ids, n_folds,
+	                               min_pres = 1) {
+		pres_per_fold <- purrr::map_int(1:n_folds, function(k) {
+			sum(presence_vec[fold_ids == k] == 1, na.rm = TRUE)
+		})
+		all(pres_per_fold >= min_pres)
+	}
+
+
+## ── Helper: extract fold IDs from blockCV result ─────────────────────────────
+
+	extract_fold_ids <- function(cv_result, n_points) {
+		if (!is.null(cv_result$folds_ids)) {
+			return(cv_result$folds_ids)
+		}
+		fold_ids <- rep(NA_integer_, n_points)
+		purrr::iwalk(cv_result$folds_list, function(fold_content, k_idx) {
+			test_idx <- if (is.list(fold_content)) {
+				fold_content[["test"]] %||% fold_content[[2]]
+			} else {
+				fold_content
+			}
+			fold_ids[test_idx] <<- as.integer(k_idx)
+		})
+		return(fold_ids)
+	}
+
+
+## ── Helper: identify sf points within raster extent ──────────────────────────
+## Returns a logical vector (TRUE = inside raster extent), which prevents
+## cv_cluster from failing with "bounding box lies outside the raster extent"
+
+	clip_sf_to_raster <- function(sf_obj, rast_obj) {
+		rast_ext <- terra::ext(rast_obj)
+		coords   <- sf::st_coordinates(sf_obj)
+		coords[, 1] >= rast_ext$xmin & coords[, 1] <= rast_ext$xmax &
+			coords[, 2] >= rast_ext$ymin & coords[, 2] <= rast_ext$ymax
+	}
+
+
+## ── Compute folds for each species ───────────────────────────────────────────
+
+	modeled_species <- species_modeling_params$species
+
+	cat("\n===================================================================\n")
+	cat("  SPATIAL CV FOLD GENERATION (blockCV)\n")
+	cat("===================================================================\n\n")
+
+	spatial_cv_folds <- purrr::map(
+		purrr::set_names(modeled_species),
+		function(sp) {
+
+			t0 <- Sys.time()
+			cat(sprintf("  %-30s\n", sp))
+
+			## Determine taxon and select reduced continuous predictors
+			if (sp %in% ALL_MOSQUITO_SPECIES) {
+				cont_vars <- setdiff(MOSQUITO_VARS_FINAL, "WorldCover")
+			} else if (sp %in% ALL_TICK_SPECIES) {
+				cont_vars <- setdiff(TICK_VARS_FINAL, "WorldCover")
+			} else {
+				cat("    SKIPPED (unknown taxon)\n")
+				return(NULL)
+			}
+
+			## Determine fold count from modeling tier
+			tier <- species_modeling_params |>
+				dplyr::filter(species == sp) |>
+				dplyr::pull(modeling_approach)
+
+			n_folds <- if (tier == "Standard_BRT") 10L else 5L
+
+			## Extract this species' presence + PA data as sf
+			sp_data <- combined_pa_presence_with_covariates |>
+				dplyr::filter(species == sp) |>
+				dplyr::filter(!is.na(longitude) & !is.na(latitude))
+
+			species_sf <- sf::st_as_sf(
+				sp_data,
+				coords = c("longitude", "latitude"),
+				crs    = 4326
+			)
+
+			## For raster operations, use just 3 key uncorrelated layers
+			## to avoid memory overflow in variogram computation
+			key_layers <- intersect(c("tas", "pr", "Elevation"), names(baseline_raster))
+			env_raster_lite <- baseline_raster[[key_layers]]
+
+
+			## ── Step 1: Estimate spatial autocorrelation range ────────────
+			## Use response-based autocorrelation (binary presence column)
+			## rather than full raster stack to avoid memory issues.
+			## Falls back to 50 km default if variogram estimation fails.
+
+			auto_range_m <- tryCatch({
+				sac <- blockCV::cv_spatial_autocor(
+					x        = species_sf,
+					column   = "presence",
+					plot     = FALSE,
+					progress = FALSE
+				)
+				sac$range
+			}, error = function(e) {
+				cat(sprintf("    autorange failed (%s); using 50 km default\n",
+				            e$message))
+				50000
+			})
+
+			cat(sprintf("    Autocorrelation range: %.0f km\n",
+			            auto_range_m / 1000))
+
+			## Enforce bounds: 10 km minimum, 100 km maximum
+			## (Georgia is ~450 km E-W; ranges above 100 km leave
+			## too few blocks for meaningful fold assignment)
+			block_size <- max(auto_range_m, 10000)
+			block_size <- min(block_size, 100000)
+
+
+			## ── Step 2: Generate spatial folds with balance checking ──────
+
+			cv_result    <- NULL
+			fold_ids     <- NULL
+			method       <- "spatial"
+			attempts     <- 0L
+			current_size <- block_size
+
+			repeat {
+				attempts <- attempts + 1L
+
+				cv_try <- tryCatch({
+					suppressWarnings(
+						blockCV::cv_spatial(
+							x         = species_sf,
+							column    = "presence",
+							size      = current_size,
+							k         = n_folds,
+							selection = "random",
+							iteration = 100,
+							seed      = 1999,
+							progress  = FALSE,
+							plot      = FALSE,
+							report    = FALSE
+						)
+					)
+				}, error = function(e) NULL)
+
+				if (!is.null(cv_try)) {
+					ids <- extract_fold_ids(cv_try, nrow(species_sf))
+					balanced <- check_fold_balance(sp_data$presence, ids, n_folds)
+
+					if (balanced) {
+						cv_result  <- cv_try
+						fold_ids   <- ids
+						block_size <- current_size
+						break
+					}
+				}
+
+				## Reduce block size by 25% for next attempt
+				current_size <- current_size * 0.75
+
+				if (current_size < 10000 || attempts > 8) {
+					cat("    Spatial blocking could not balance folds;",
+					    "falling back to environmental clustering\n")
+					method <- "cluster"
+					break
+				}
+
+				cat(sprintf("    Retry with block size %.0f km (attempt %d)\n",
+				            current_size / 1000, attempts))
+			}
+
+
+			## ── Fallback: environmental clustering ───────────────────────
+			## Clip sf to raster extent to prevent bounding box errors,
+			## then cluster in environmental space.
+
+			if (method == "cluster") {
+
+				## Identify points inside the raster extent (bounding box check)
+				within_bbox <- clip_sf_to_raster(species_sf, env_raster_lite)
+
+				## Further filter: drop points on NA raster cells (ocean, border).
+				## cv_cluster requires raster values at every point location.
+				rast_vals <- terra::extract(
+					env_raster_lite,
+					terra::vect(species_sf[within_bbox, ]),
+					ID = FALSE
+				)
+				has_data <- complete.cases(rast_vals)
+
+				## Combine both masks: inside bbox AND on valid raster cells
+				bbox_indices <- which(within_bbox)
+				valid_indices <- bbox_indices[has_data]
+				within_mask <- seq_len(nrow(species_sf)) %in% valid_indices
+
+				species_sf_clipped <- species_sf[within_mask, ]
+				sp_data_clipped    <- sp_data[within_mask, ]
+
+				cat(sprintf("    Clipped %d -> %d points with valid raster coverage\n",
+				            nrow(species_sf), nrow(species_sf_clipped)))
+
+				cv_try <- tryCatch({
+					blockCV::cv_cluster(
+						x       = species_sf_clipped,
+						column  = "presence",
+						k       = n_folds,
+						r       = env_raster_lite,
+						scale   = TRUE,
+						report  = FALSE
+					)
+				}, error = function(e) {
+					cat("    Environmental clustering also failed:",
+					    e$message, "\n")
+					NULL
+				})
+
+				if (!is.null(cv_try)) {
+					fold_ids_clipped <- extract_fold_ids(
+						cv_try, nrow(species_sf_clipped)
+					)
+
+					## Map clipped fold IDs back to full index space;
+					## points outside the raster get NA fold assignment
+					fold_ids <- rep(NA_integer_, nrow(species_sf))
+					fold_ids[within_mask] <- fold_ids_clipped
+					cv_result  <- cv_try
+					block_size <- NA_real_
+
+					## Use clipped data for fold diagnostics
+					sp_data <- sp_data_clipped
+				}
+			}
+
+
+			## ── Bail out if nothing worked ────────────────────────────────
+			if (is.null(fold_ids)) {
+				cat("    FAILED: no valid fold assignment produced\n\n")
+				return(NULL)
+			}
+
+
+			## ── Step 3: Report fold diagnostics ──────────────────────────
+
+			## Only use non-NA fold assignments for diagnostics
+			valid_folds <- !is.na(fold_ids)
+
+			pres_per_fold <- purrr::map_int(1:n_folds, function(k) {
+				sum(sp_data$presence[valid_folds][fold_ids[valid_folds] == k] == 1,
+				    na.rm = TRUE)
+			})
+
+			elapsed <- round(difftime(Sys.time(), t0, units = "secs"), 1)
+
+			cat(sprintf(
+				"    method=%s  size=%s  k=%d  pres/fold=%s  (%.1fs)\n\n",
+				method,
+				if (is.na(block_size)) "env" else paste0(round(block_size/1000), "km"),
+				n_folds,
+				paste(pres_per_fold, collapse = "/"),
+				elapsed
+			))
+
+			list(
+				fold_ids       = fold_ids,
+				n_folds        = n_folds,
+				block_size_m   = block_size,
+				block_size_km  = if (!is.na(block_size)) block_size / 1000 else NA_real_,
+				autorange_m    = auto_range_m,
+				autorange_km   = auto_range_m / 1000,
+				pres_per_fold  = pres_per_fold,
+				tier           = tier,
+				method         = method,
+				cv_result      = cv_result
+			)
+		}
+	)
+
+	## Remove any NULLs (species that failed entirely)
+	spatial_cv_folds <- purrr::compact(spatial_cv_folds)
+
+
+## ── Summary ──────────────────────────────────────────────────────────────────
+
+	cat("\n  Successfully generated folds for",
+	    length(spatial_cv_folds), "of", length(modeled_species), "species.\n")
+
+	## Report species with any fold containing very few presences
+	low_pres_warnings <- purrr::imap_chr(spatial_cv_folds, function(fld, sp) {
+		min_pres <- min(fld$pres_per_fold)
+		if (min_pres < 3) {
+			sprintf("    %-30s  min presences in fold = %d  (%s)",
+			        sp, min_pres, fld$method)
+		} else {
+			NA_character_
+		}
+	}) |>
+		purrr::discard(is.na)
+
+	if (length(low_pres_warnings) > 0) {
+		cat("\n  NOTE: some folds have fewer than 3 presences:\n")
+		purrr::walk(low_pres_warnings, cat, "\n")
+		cat("\n  Spatial CV metrics for these species should be interpreted",
+		    "with caution.\n")
+	}
+
+	## Summary table
+	cat("\n")
+	fold_summary <- purrr::imap_dfr(spatial_cv_folds, function(fld, sp) {
+		tibble::tibble(
+			species       = sp,
+			method        = fld$method,
+			autorange_km  = round(fld$autorange_km, 1),
+			block_size_km = round(fld$block_size_km, 1),
+			n_folds       = fld$n_folds,
+			min_pres      = min(fld$pres_per_fold),
+			max_pres      = max(fld$pres_per_fold),
+			tier          = fld$tier
+		)
+	})
+	print(fold_summary, n = Inf, width = Inf)
+
+
+## ── Save to disk ─────────────────────────────────────────────────────────────
+
+	FOLD_SAVE_DIR <- file.path(
+		"C:/Users/ianpsheasmith/OneDrive - University of Florida",
+		"General - Georgia Ticks/Georgia_Ticks/Paper2_Data/Summaries"
+	)
+	dir.create(FOLD_SAVE_DIR, showWarnings = FALSE, recursive = TRUE)
+
+	spatial_cv_folds_light <- purrr::map(spatial_cv_folds, function(fld) {
+		list(
+			fold_ids      = fld$fold_ids,
+			n_folds       = fld$n_folds,
+			block_size_m  = fld$block_size_m,
+			block_size_km = fld$block_size_km,
+			autorange_m   = fld$autorange_m,
+			autorange_km  = fld$autorange_km,
+			pres_per_fold = fld$pres_per_fold,
+			tier          = fld$tier,
+			method        = fld$method
+		)
+	})
+
+	saveRDS(
+		spatial_cv_folds_light,
+		file = file.path(FOLD_SAVE_DIR, "spatial_cv_folds.rds")
+	)
+	cat("\n  Saved: spatial_cv_folds.rds\n")
+
+	rm(spatial_cv_folds_light, FOLD_SAVE_DIR, low_pres_warnings,
+	   fold_summary, extract_fold_ids, check_fold_balance,
+	   clip_sf_to_raster, modeled_species)
+	gc()
+
+```
+
+```{r ESMs Full Pipeline}
+
+  # ESM Pipeline: All ESM-eligible species
+    # MAXNET with LQH features, betamultiplier = 2.5 (Breiner et al. 2018)
+
+
+  ## Clean stale biomod2 working directories
+    old_dirs <- list.dirs(".", recursive = FALSE) |>
+    	grep("ESM\\.BIOMOD\\.output|BIOMOD_output|test_An", x = _, value = TRUE)
+    purrr::walk(old_dirs, ~ unlink(.x, recursive = TRUE))
+    cat("Cleaned", length(old_dirs), "stale directories\n")
+
+    set.seed(1999)
+
+
+  # Configuration
+  # Output path for model objects (OneDrive)
+    SAVE_DIR <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_ESMs"
+    dir.create(SAVE_DIR, showWarnings = FALSE, recursive = TRUE)
+
+  # ESM species and their covariate sets
+    ESM_SPECIES <- c(
+    	"Aedes aegypti", "Aedes geniculatus",
+    	"Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
+    	"Culex tritaeniorhynchus", "Culiseta annulata", "Culiseta longiareolata",
+    	"Hyalomma aegyptium", "Rhipicephalus sanguineus"
+    )
+
+    MOSQUITO_COVARIATES <- MOSQUITO_VARS_FINAL
+    
+    TICK_COVARIATES     <- TICK_VARS_FINAL
+    
+    TICK_SPECIES <- c(
+    	"Hyalomma aegyptium", "Rhipicephalus sanguineus"
+    )
+
+
+  # Get covariates by taxon
+  
+    get_covariates <- function(sp_name) {
+    	if (sp_name %in% TICK_SPECIES) TICK_COVARIATES else MOSQUITO_COVARIATES
+    }
+  
+  
+  # Helper: compute maxSSS threshold
+  
+    compute_maxsss <- function(preds, obs) {
+    	pres_p <- preds[obs == 1]
+    	abs_p  <- preds[obs == 0]
+    	cands  <- sort(unique(preds[!is.na(preds)]))
+    	if (length(cands) > 500) {
+    		cands <- quantile(cands, seq(0, 1, length.out = 500), na.rm = TRUE)
+    	}
+    	ss <- map_dbl(cands, function(t) {
+    		sum(pres_p >= t) / length(pres_p) + sum(abs_p < t) / length(abs_p)
+    	})
+    	cands[which.max(ss)]
+    }
+  
+  
+  # Run ESM for one species
+  
+    run_esm <- function(sp_name, data, baseline_raster) {
+    
+    	covariates <- get_covariates(sp_name)
+    	sp_slug    <- gsub(" ", "_", sp_name)
+    
+    	# Prepare data
+      	sp_data <- data |>
+      		filter(species == sp_name) |>
+      		drop_na(all_of(covariates))
+    
+    	resp <- sp_data$presence
+    	xy   <- sp_data |> dplyr::select(longitude, latitude) |> as.data.frame()
+    	expl <- sp_data |> dplyr::select(all_of(covariates)) |> as.data.frame()
+    
+    	n_pres <- sum(resp == 1)
+    	n_pa   <- sum(resp == 0)
+    	n_biva <- choose(ncol(expl), 2)
+    
+    	# Format for biomod2
+    	biomod_data <- BIOMOD_FormatingData(
+    		resp.var  = resp,
+    		expl.var  = expl,
+    		resp.xy   = xy,
+    		resp.name = sp_slug
+    	)
+  
+  	# MAXNET options: LQH + beta = 2.5
+  	maxnet_opts <- tryCatch({
+  		bm_ModelingOptions(
+  			data.type = "binary",
+  			models    = "MAXNET",
+  			strategy  = "user.defined",
+  			user.val  = list(
+  				MAXNET.binary.maxnet.maxnet = list(
+  					"_allData_allRun" = list(regmult = 2.5, classes = "lqh")
+  				)
+  			),
+  			user.base = "bigboss",
+  			bm.format = biomod_data
+  		)
+  	}, error = function(e) {
+  		bm_ModelingOptions(
+  			data.type = "binary",
+  			models    = "MAXNET",
+  			strategy  = "bigboss",
+  			bm.format = biomod_data
+  		)
+  	})
+  
+  	# Fit bivariate ESMs
+  	esm_model <- ecospat.ESM.Modeling(
+  		data            = biomod_data,
+  		models          = c("MAXNET"),
+  		models.options  = maxnet_opts,
+  		NbRunEval       = 3,
+  		DataSplit       = 70,
+  		Prevalence      = 0.5,
+  		weighting.score = c("SomersD"),
+  		parallel        = FALSE,
+  		modeling.id     = sp_slug,
+  		cleanup         = FALSE
+  	)
+  
+  	n_failed <- length(esm_model$failed)
+  
+  	# Ensemble weighted by Somers' D
+  	esm_ensemble <- ecospat.ESM.EnsembleModeling(
+  		ESM.modeling.output = esm_model,
+  		weighting.score     = c("SomersD"),
+  		threshold           = 0
+  	)
+  
+  	# Evaluation metrics (mean across runs)
+  	evals    <- esm_ensemble$ESM.evaluations
+  	mean_auc <- mean(evals$AUC, na.rm = TRUE)
+  	mean_tss <- mean(evals$TSS, na.rm = TRUE)
+  
+  	# Thresholds from ensemble fitted values (on 0-1000 scale, convert to 0-1)
+  	fit_df    <- esm_ensemble$ESM.fit
+  	ens_col   <- grep("Full_", names(fit_df), value = TRUE)[1]
+  	ens_preds <- fit_df[[ens_col]]
+  	pres_preds <- ens_preds[resp == 1]
+  
+  	mtp    <- min(pres_preds, na.rm = TRUE) / 1000
+  	maxsss <- compute_maxsss(ens_preds, resp) / 1000
+  
+  	# Project to baseline raster and rescale to 0-1
+  	baseline_proj <- NULL
+  	proj_status   <- "skipped"
+  
+  	if (!is.null(baseline_raster)) {
+  		baseline_proj <- tryCatch({
+  			biv_proj <- ecospat.ESM.Projection(
+  				ESM.modeling.output = esm_model,
+  				new.env             = baseline_raster,
+  				name.env            = "Baseline",
+  				parallel            = FALSE
+  			)
+  			ens_proj <- ecospat.ESM.EnsembleProjection(
+  				ESM.prediction.output       = biv_proj,
+  				ESM.EnsembleModeling.output = esm_ensemble
+  			)
+  			# Rescale from 0-1000 to 0-1
+  			ens_proj / 1000
+  		}, error = function(e) {
+  			warning(sp_name, " projection failed: ", e$message)
+  			NULL
+  		})
+  		proj_status <- if (!is.null(baseline_proj)) "success" else "failed"
+  	}
+  
+  	# Return everything
+  	list(
+  		species         = sp_name,
+  		esm_model       = esm_model,
+  		esm_ensemble    = esm_ensemble,
+  		baseline_raster = baseline_proj,
+  		n_pres          = n_pres,
+  		n_pa            = n_pa,
+  		n_biva          = n_biva,
+  		n_failed        = n_failed,
+  		mean_auc        = mean_auc,
+  		mean_tss        = mean_tss,
+  		mtp             = mtp,
+  		maxsss          = maxsss,
+  		proj_status     = proj_status,
+  		covariates      = covariates
+  	)
+  }
+  
+  
+  # ── Run all ESM species ──────────────────────────────────────────────────────
+  
+  cat("Starting ESM pipeline for", length(ESM_SPECIES), "species...\n\n")
+  
+  esm_results <- map(set_names(ESM_SPECIES), function(sp) {
+  	cat("  Fitting:", sp, "...")
+  	t0  <- Sys.time()
+  	res <- tryCatch(
+  		run_esm(sp, combined_pa_presence_with_covariates, baseline_raster),
+  		error = function(e) {
+  			cat(" FAILED:", e$message, "\n")
+  			list(
+  				species = sp, esm_model = NULL, esm_ensemble = NULL,
+  				baseline_raster = NULL, n_pres = NA, n_pa = NA,
+  				n_biva = NA, n_failed = NA, mean_auc = NA, mean_tss = NA,
+  				mtp = NA, maxsss = NA, proj_status = "error", covariates = NA
+  			)
+  		}
+  	)
+  	elapsed <- round(difftime(Sys.time(), t0, units = "mins"), 1)
+  	cat(" done (", elapsed, "min)\n")
+  	res
+  })
+  
+  
+  # ── Summary table ────────────────────────────────────────────────────────────
+  
+  esm_summary <- esm_results |>
+  	map_dfr(function(r) {
+  		tibble(
+  			species        = r$species,
+  			n_pres         = r$n_pres,
+  			n_pa           = r$n_pa,
+  			n_biva_combos  = r$n_biva,
+  			n_failed       = r$n_failed,
+  			mean_auc       = round(r$mean_auc, 3),
+  			mean_tss       = round(r$mean_tss, 3),
+  			thresh_mtp     = round(r$mtp, 4),
+  			thresh_maxsss  = round(r$maxsss, 4),
+  			projection     = r$proj_status
+  		)
+  	})
+  
+  cat("\n")
+  cat("══════════════════════════════════════════════════════════════\n")
+  cat("  ESM RESULTS SUMMARY\n")
+  cat("══════════════════════════════════════════════════════════════\n\n")
+  print(esm_summary, n = 20, width = Inf)
+  
+  
+  # ── Save outputs ─────────────────────────────────────────────────────────────
+  
+  # Save each species' model objects individually for future climate projections
+  walk(esm_results, function(r) {
+  	if (is.null(r$esm_model)) return(invisible())
+  
+  	sp_slug <- gsub(" ", "_", r$species)
+  	sp_dir  <- file.path(SAVE_DIR, sp_slug)
+  	dir.create(sp_dir, showWarnings = FALSE, recursive = TRUE)
+  
+  	# Model and ensemble objects (needed for future projections)
+  	saveRDS(
+  		list(
+  			esm_model    = r$esm_model,
+  			esm_ensemble = r$esm_ensemble,
+  			covariates   = r$covariates,
+  			thresholds   = list(mtp = r$mtp, maxsss = r$maxsss)
+  		),
+  		file.path(sp_dir, "esm_model_objects.rds")
+  	)
+  
+  	# Baseline prediction raster (0-1 scale)
+  	if (!is.null(r$baseline_raster)) {
+  		writeRaster(
+  			r$baseline_raster,
+  			file.path(sp_dir, "baseline_suitability.tif"),
+  			overwrite = TRUE
+  		)
+  	}
+  })
+  
+  # Save summary table
+  write_csv(esm_summary, file.path(SAVE_DIR, "esm_summary.csv"))
+  
+  # Save the full results list (for reloading into R later)
+  saveRDS(esm_results, file.path(SAVE_DIR, "esm_all_results.rds"))
+  
+  cat("\nAll outputs saved to:\n ", SAVE_DIR, "\n")
+  cat("\nPer-species folders contain:\n")
+  cat("  - esm_model_objects.rds  (model + ensemble for future projections)\n")
+  cat("  - baseline_suitability.tif (0-1 probability raster)\n")
+
+
+```
+
+```{r BRT Conservative Pipeline}
+
+  # Set the seed for reproducibility
+    set.seed(1999)
+
+	## Input directory: per-iteration .rds files with combined presence + PA data
+	  INPUT_DIR <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_BRTs_New/PA_Iterations"
+
+	## Output directory for tuned BRT results
+	  OUTPUT_DIR <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_BRTs_New/Tuned_BRT_Results"
+
+	## Create output subdirectories
+  	dir.create(file.path(OUTPUT_DIR, "models"),              showWarnings = FALSE, recursive = TRUE)
+  	dir.create(file.path(OUTPUT_DIR, "statistics"),           showWarnings = FALSE, recursive = TRUE)
+  	dir.create(file.path(OUTPUT_DIR, "partial_dependence"),   showWarnings = FALSE, recursive = TRUE)
+
+	## Conservative BRT parameters for the 50–100 occurrence tier
+	## tc=1: additive only, no interaction terms (Elith et al. 2008)
+	## bag.fraction=0.5: more stochasticity per tree for regularization
+	## n.folds=5: stable fold sizes (~13 presences per test fold)
+	## step.size=25: finer evaluation of optimal tree number
+  	BRT_PARAMS <- list(
+  		tree.complexity = 1,
+  		learning.rate   = 0.001,
+  		bag.fraction    = 0.5,
+  		n.folds         = 5,
+  		family          = "bernoulli",
+  		step.size       = 25,
+  		max.trees       = 50000
+  	)
+
+	## The four "Tuned BRT" species (50–100 occurrences)
+  	TUNED_SPECIES <- c(
+  		"Aedes vexans",
+  		"Culex theileri",
+  		"Haemaphysalis inermis",
+  		"Hyalomma marginatum"
+  	)
+
+	## Species-to-taxon mapping (determines covariate set)
+  	MOSQUITO_SPECIES <- c("Aedes vexans", "Culex theileri")
+  	TICK_SPECIES     <- c("Haemaphysalis inermis", "Hyalomma marginatum")
+
+	## Categorical covariate
+	  CATEGORICAL_VAR <- "WorldCover"
+
+	## Mosquito covariates: climate + terrain + NDVI + wind (no soil)
+  	MOSQUITO_VARS <- c(
+  		"hurs", "pr", "sfcWind", "tas", "tasmax", "tasmin",
+  		"NDVI", "Elevation", "Slope", CATEGORICAL_VAR
+  	)
+
+	## Tick covariates: climate + terrain + NDVI + soil (no wind)
+  	TICK_VARS <- c(
+  		"hurs", "pr", "tas", "tasmax", "tasmin",
+  		"NDVI", "Elevation", "Slope",
+  		"BulkDensity", "CoarseFragments", "Nitrogen",
+  		"SoilpH", "SandContent", "SiltContent", "SoilOrganicCarbon",
+  		CATEGORICAL_VAR
+  	)
+
+
+	#' Retrieve appropriate covariate names for a given species
+  	get_predictor_vars <- function(species_name) {
+  		if (species_name %in% MOSQUITO_SPECIES) return(MOSQUITO_VARS)
+  		if (species_name %in% TICK_SPECIES)     return(TICK_VARS)
+  		stop("Species '", species_name, "' not found in taxon lists.")
+  	}
+
+
+	#' Determine vector type label for a species
+  	get_vector_type <- function(species_name) {
+  		if (species_name %in% MOSQUITO_SPECIES) return("mosquito")
+  		if (species_name %in% TICK_SPECIES)     return("tick")
+  		stop("Species '", species_name, "' not found in taxon lists.")
+  	}
+
+
+	#' Prepare a data frame for BRT modeling
+	#' Selects response + predictors, drops NAs, converts WorldCover to factor
+  	prepare_brt_data <- function(df, predictor_vars) {
+  
+  		model_df <- df |>
+  			dplyr::select(presence, all_of(predictor_vars)) |>
+  			drop_na()
+  
+  		## Ensure WorldCover is treated as categorical
+  		if (CATEGORICAL_VAR %in% names(model_df)) {
+  			model_df <- model_df |>
+  				mutate(!!CATEGORICAL_VAR := as.factor(.data[[CATEGORICAL_VAR]]))
+  		}
+  
+  		return(model_df)
+  	}
+
+
+	#' Fit a single BRT model via dismo::gbm.step()
+	#' Returns NULL on failure rather than stopping the pipeline
+  	fit_single_brt <- function(model_data, predictor_vars, params) {
+  
+  		## Column indices required by gbm.step
+  		  response_col  <- which(names(model_data) == "presence")
+  		  predictor_cols <- which(names(model_data) %in% predictor_vars)
+  
+  		## Fit with suppressed convergence warnings (expected for binary data)
+    		model <- tryCatch({
+    			suppressWarnings({
+    				gbm.step(
+    					data            = as.data.frame(model_data),
+    					gbm.x           = predictor_cols,
+    					gbm.y           = response_col,
+    					family           = params$family,
+    					tree.complexity  = params$tree.complexity,
+    					learning.rate    = params$learning.rate,
+    					bag.fraction     = params$bag.fraction,
+    					n.folds          = params$n.folds,
+    					step.size        = params$step.size,
+    					max.trees        = params$max.trees,
+    					plot.main        = FALSE,
+    					plot.folds       = FALSE,
+    					silent           = TRUE
+    				)
+    			})
+    		}, error = function(e) {
+    			warning("BRT fitting failed: ", e$message)
+    			return(NULL)
+    		})
+    
+    		return(model)
+    	}
+
+
+	#' Extract performance statistics from a fitted gbm.step model
+  	extract_model_stats <- function(model) {
+  
+  		if (is.null(model)) {
+  			return(tibble(
+  				n_trees            = NA_integer_,
+  				cv_deviance_mean   = NA_real_,
+  				cv_deviance_se     = NA_real_,
+  				training_auc       = NA_real_,
+  				cv_auc             = NA_real_,
+  				cv_correlation     = NA_real_,
+  				deviance_explained = NA_real_
+  			))
+  		}
+
+		## Optimal number of trees from CV
+		  n_trees <- model$gbm.call$best.trees
+
+		## CV deviance at optimal tree number
+		  cv_deviance_mean <- model$cv.statistics$deviance.mean
+		  cv_deviance_se   <- model$cv.statistics$deviance.se
+
+		## AUC: training and cross-validated
+		  training_auc <- model$self.statistics$discrimination
+		  cv_auc       <- model$cv.statistics$discrimination.mean
+
+		## CV correlation (Pearson between observed and predicted in held-out folds)
+		  cv_correlation <- model$cv.statistics$correlation.mean
+
+		## Deviance explained: (null - residual) / null × 100
+		  deviance_explained <- (1 - (model$cv.statistics$deviance.mean /
+		                            model$self.statistics$mean.null)) * 100
+
+  		tibble(
+  			n_trees            = n_trees,
+  			cv_deviance_mean   = cv_deviance_mean,
+  			cv_deviance_se     = cv_deviance_se,
+  			training_auc       = training_auc,
+  			cv_auc             = cv_auc,
+  			cv_correlation     = cv_correlation,
+  			deviance_explained = deviance_explained
+  		)
+  	}
+
+
+	#' Extract variable importance from a fitted gbm.step model
+  	extract_var_importance <- function(model) {
+  
+  		if (is.null(model)) return(NULL)
+  
+  		## gbm.step stores relative influence in the summary
+  		importance <- summary(model, plotit = FALSE) |>
+  			as_tibble() |>
+  			rename(variable = var, rel_influence = rel.inf)
+  
+  		return(importance)
+  	}
+
+
+	#' Extract partial dependence data for all predictors from a gbm.step model
+	#' Returns a tibble with variable, x-value, and predicted y-value columns
+  	extract_partial_dependence <- function(model, predictor_vars) {
+  
+  		if (is.null(model)) return(NULL)
+  
+  		## Iterate across all predictors and extract PDP values
+    		pdp_data <- purrr::map_dfr(
+    			seq_along(predictor_vars),
+    			function(var_idx) {
+  
+  				## gbm::plot.gbm returns the PDP data invisibly
+    				pdp <- tryCatch({
+    					plot.gbm(model, i.var = var_idx, return.grid = TRUE)
+    				}, error = function(e) {
+    					return(NULL)
+    				})
+    
+    				if (is.null(pdp)) return(NULL)
+    
+    				tibble(
+    					variable = predictor_vars[var_idx],
+    					x        = as.numeric(pdp[[1]]),
+    					y        = pdp$y
+    				)
+    			}
+    		)
+  
+  		return(pdp_data)
+  	}
+
+
+  # LOAD AND DISAGGREGATE ITERATION DATA BY SPECIES
+
+  	## List all iteration files
+    	iteration_files <- list.files(
+    		INPUT_DIR,
+    		pattern    = "^brt_data_iteration_\\d{3}\\.rds$",
+    		full.names = TRUE
+    	) |>
+    		sort()
+
+  	## Verify we have all 100
+    	if (length(iteration_files) != 100) {
+    		warning("Expected 100 iteration files, found ", length(iteration_files))
+    	}
+
+	  sample_data <- readRDS(iteration_files[1])
+
+  	## Confirm our four target species are present
+    	available_species <- unique(sample_data$species)
+    	missing_species   <- setdiff(TUNED_SPECIES, available_species)
+
+    	if (length(missing_species) > 0) {
+    		stop("Missing species in iteration data: ", paste(missing_species, collapse = ", "))
+    	}
+    	
+	purrr::walk(TUNED_SPECIES, ~ cat("  •", .x, "\n"))
+
+  	## Clean up sample data
+    	rm(sample_data)
+    	gc()
+
+
+  # RUN THE MODELS! Code structured w/ assistance from claude.ai;
+    	# verified and double-checked prior to and following the
+    	# completed run.
+    	
+  	purrr::walk(
+  		TUNED_SPECIES,
+  		function(sp) {
+  
+  			cat("\n───────────────────────────────────────────────────────────────────\n")
+  			cat("SPECIES:", sp, "\n")
+  			cat("───────────────────────────────────────────────────────────────────\n")
+  
+  			## Determine covariate set based on taxon
+  			predictor_vars <- get_predictor_vars(sp)
+  			vector_type    <- get_vector_type(sp)
+  
+  			cat("  Vector type:", vector_type, "\n")
+  			cat("  Predictors: ", length(predictor_vars), "\n")
+  
+  			## Containers to accumulate results across iterations
+  			all_models     <- vector("list", length(iteration_files))
+  			all_stats      <- vector("list", length(iteration_files))
+  			all_varimp     <- vector("list", length(iteration_files))
+  			all_pdp        <- vector("list", length(iteration_files))
+  
+  			## Track iteration-level progress
+  			n_failed <- 0L
+  
+  			purrr::walk(
+  				seq_along(iteration_files),
+  				function(i) {
+  
+  					if (i %% 10 == 1 || i == length(iteration_files)) {
+  						cat(sprintf("  Iteration %3d / %d ...\n", i, length(iteration_files)))
+  					}
+  
+  					## Load this iteration and filter to target species
+  					iter_data <- readRDS(iteration_files[i]) |>
+  						dplyr::filter(species == sp)
+  
+  					## Prepare for modeling
+  					model_data <- prepare_brt_data(iter_data, predictor_vars)
+  
+  					## Report sample size on first iteration
+  					if (i == 1) {
+  						n_pres <- sum(model_data$presence == 1)
+  						n_abs  <- sum(model_data$presence == 0)
+  						cat(sprintf("  Sample size: %d presences, %d pseudo-absences\n", n_pres, n_abs))
+  					}
+  
+  					## Fit BRT
+  					model <- fit_single_brt(model_data, predictor_vars, BRT_PARAMS)
+  
+  					## Track failures
+  					if (is.null(model)) {
+  						n_failed <<- n_failed + 1L
+  					}
+  
+  					## Store model object
+  					all_models[[i]] <<- model
+  
+  					## Extract statistics
+  					all_stats[[i]] <<- extract_model_stats(model) |>
+  						mutate(iteration = i)
+  
+  					## Extract variable importance
+  					varimp <- extract_var_importance(model)
+  					if (!is.null(varimp)) {
+  						all_varimp[[i]] <<- varimp |>
+  							mutate(iteration = i)
+  					}
+  
+  					## Extract partial dependence
+  					pdp <- extract_partial_dependence(model, predictor_vars)
+  					if (!is.null(pdp)) {
+  						all_pdp[[i]] <<- pdp |>
+  							mutate(iteration = i)
+  					}
+  
+  					## Free memory from loaded iteration data
+  					rm(iter_data, model_data, model)
+  
+  				}
+  			) ## End iteration loop
+  
+  			## Report completion for this species
+  			cat(sprintf("\n  Completed: %d models fit, %d failures\n",
+  			            length(iteration_files) - n_failed, n_failed))
+  
+  
+  			# ─────────────────────────────────────────────────────────────────
+  			# COMPILE AND SAVE STATISTICS
+  			# ─────────────────────────────────────────────────────────────────
+  
+  			## Performance statistics across all iterations
+  			species_stats <- bind_rows(all_stats) |>
+  				mutate(
+  					species     = sp,
+  					vector_type = vector_type,
+  					.before     = everything()
+  				)
+  
+  			## Summary statistics (means + SDs across iterations)
+  			species_summary <- species_stats |>
+  				dplyr::filter(!is.na(n_trees)) |>
+  				summarise(
+  					species            = first(species),
+  					vector_type        = first(vector_type),
+  					n_models           = n(),
+  					n_failed           = n_failed,
+  					n_trees_mean       = mean(n_trees),
+  					n_trees_sd         = sd(n_trees),
+  					n_trees_min        = min(n_trees),
+  					n_trees_max        = max(n_trees),
+  					cv_deviance_mean   = mean(cv_deviance_mean),
+  					cv_deviance_sd     = sd(cv_deviance_mean),
+  					training_auc_mean  = mean(training_auc),
+  					training_auc_sd    = sd(training_auc),
+  					cv_auc_mean        = mean(cv_auc),
+  					cv_auc_sd          = sd(cv_auc),
+  					cv_correlation_mean = mean(cv_correlation),
+  					cv_correlation_sd  = sd(cv_correlation),
+  					deviance_explained_mean = mean(deviance_explained),
+  					deviance_explained_sd   = sd(deviance_explained),
+  					.groups = "drop"
+  				)
+  
+  			cat("\n  Summary statistics:\n")
+  			cat(sprintf("    CV AUC:             %.4f ± %.4f\n",
+  			            species_summary$cv_auc_mean, species_summary$cv_auc_sd))
+  			cat(sprintf("    Training AUC:       %.4f ± %.4f\n",
+  			            species_summary$training_auc_mean, species_summary$training_auc_sd))
+  			cat(sprintf("    Deviance explained: %.2f%% ± %.2f%%\n",
+  			            species_summary$deviance_explained_mean, species_summary$deviance_explained_sd))
+  			cat(sprintf("    Optimal trees:      %.0f ± %.0f (range: %d – %d)\n",
+  			            species_summary$n_trees_mean, species_summary$n_trees_sd,
+  			            species_summary$n_trees_min, species_summary$n_trees_max))
+  
+  
+  			# ─────────────────────────────────────────────────────────────────
+  			# COMPILE VARIABLE IMPORTANCE
+  			# ─────────────────────────────────────────────────────────────────
+  
+  			## Aggregate importance across iterations (mean ± SD)
+  			species_varimp_raw <- bind_rows(compact(all_varimp))
+  
+  			species_varimp_summary <- species_varimp_raw |>
+  				group_by(variable) |>
+  				summarise(
+  					mean_influence = mean(rel_influence),
+  					sd_influence   = sd(rel_influence),
+  					min_influence  = min(rel_influence),
+  					max_influence  = max(rel_influence),
+  					.groups        = "drop"
+  				) |>
+  				arrange(desc(mean_influence)) |>
+  				mutate(
+  					species     = sp,
+  					vector_type = vector_type,
+  					.before     = everything()
+  				)
+  
+  			cat("\n  Top 5 variables:\n")
+  			species_varimp_summary |>
+  				slice_head(n = 5) |>
+  				mutate(label = sprintf("    %s: %.2f%% ± %.2f%%", variable,
+  				                       mean_influence, sd_influence)) |>
+  				pull(label) |>
+  				walk(cat, "\n")
+  
+  
+  			# ─────────────────────────────────────────────────────────────────
+  			# COMPILE AVERAGED PARTIAL DEPENDENCE PLOTS
+  			# ─────────────────────────────────────────────────────────────────
+  
+  			## Average PDP curves across all iterations
+  			## For each variable, bin x-values and compute mean ± SD of y
+  			species_pdp_raw <- bind_rows(compact(all_pdp))
+  
+  			species_pdp_averaged <- species_pdp_raw |>
+  				group_by(variable) |>
+  				mutate(
+  					## Create consistent x-bins within each variable's range
+  					x_bin = cut(x, breaks = 50, labels = FALSE)
+  				) |>
+  				group_by(variable, x_bin) |>
+  				summarise(
+  					x_mean = mean(x),
+  					y_mean = mean(y),
+  					y_sd   = sd(y),
+  					y_lower = y_mean - y_sd,
+  					y_upper = y_mean + y_sd,
+  					.groups = "drop"
+  				) |>
+  				mutate(
+  					species     = sp,
+  					vector_type = vector_type,
+  					.before     = everything()
+  				)
+  
+  
+  			# ─────────────────────────────────────────────────────────────────
+  			# SAVE ALL OUTPUTS
+  			# ─────────────────────────────────────────────────────────────────
+  
+  			## Clean species name for filenames
+  			sp_clean <- str_replace_all(sp, " ", "_")
+  
+  			## Save model objects (list of 100 gbm.step objects)
+  			saveRDS(
+  				all_models,
+  				file = file.path(OUTPUT_DIR, "models",
+  				                 paste0(sp_clean, "_tuned_brt_models.rds"))
+  			)
+  
+  			## Save per-iteration statistics
+  			saveRDS(
+  				species_stats,
+  				file = file.path(OUTPUT_DIR, "statistics",
+  				                 paste0(sp_clean, "_iteration_stats.rds"))
+  			)
+  
+  			## Save summary statistics
+  			saveRDS(
+  				species_summary,
+  				file = file.path(OUTPUT_DIR, "statistics",
+  				                 paste0(sp_clean, "_summary_stats.rds"))
+  			)
+  
+  			## Save variable importance (raw + summary)
+  			saveRDS(
+  				list(raw = species_varimp_raw, summary = species_varimp_summary),
+  				file = file.path(OUTPUT_DIR, "statistics",
+  				                 paste0(sp_clean, "_variable_importance.rds"))
+  			)
+  
+  			## Save averaged PDP data
+  			saveRDS(
+  				species_pdp_averaged,
+  				file = file.path(OUTPUT_DIR, "partial_dependence",
+  				                 paste0(sp_clean, "_averaged_pdp.rds"))
+  			)
+  
+  			cat("\n  Outputs saved to:", file.path(OUTPUT_DIR), "\n")
+  
+  			## Free memory before next species
+  			rm(all_models, all_stats, all_varimp, all_pdp,
+  			   species_stats, species_summary, species_varimp_raw,
+  			   species_varimp_summary, species_pdp_raw, species_pdp_averaged)
+  			gc()
+  
+  		}
+  	) ## End species loop
+
+
+  	## Load all individual species summaries and bind into a single table
+    	summary_files <- list.files(
+    		file.path(OUTPUT_DIR, "statistics"),
+    		pattern    = "_summary_stats\\.rds$",
+    		full.names = TRUE
+    	)
+  
+    	cross_species_summary <- purrr::map_dfr(summary_files, readRDS) |>
+    		arrange(desc(cv_auc_mean))
+  
+  	## Print formatted table
+    	cross_species_summary |>
+    		mutate(
+    			label = sprintf(
+    				"  %-25s  CV AUC: %.4f ± %.4f  |  DevExpl: %5.1f%% ± %4.1f%%  |  Trees: %5.0f ± %5.0f  |  Failed: %d",
+    				species, cv_auc_mean, cv_auc_sd,
+    				deviance_explained_mean, deviance_explained_sd,
+    				n_trees_mean, n_trees_sd, n_failed
+    			)
+    		) |>
+    		pull(label) |>
+    		walk(cat, "\n")
+  
+  	## Save the combined summary
+    	saveRDS(
+    		cross_species_summary,
+    		file = file.path(OUTPUT_DIR, "statistics", "tuned_brt_cross_species_summary.rds")
+    	)
+    	write_csv(
+    		cross_species_summary,
+    		file = file.path(OUTPUT_DIR, "statistics", "tuned_brt_cross_species_summary.csv")
+    	)
+
+```
+
+```{r BRT Robust Species Pipeline}
+
+  set.seed(1999)
+
+  # CONFIGURATION
+  
+  	## Input directory: per-iteration .rds files with combined presence + PA data
+  	  INPUT_DIR <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_BRTs_New/PA_Iterations"
+  
+  	## Output directory for standard BRT results
+  	  OUTPUT_DIR <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_BRTs_New/Standard_BRT_Results"
+  
+  	## Create output subdirectories
+    	dir.create(file.path(OUTPUT_DIR, "models"),              showWarnings = FALSE, recursive = TRUE)
+    	dir.create(file.path(OUTPUT_DIR, "statistics"),           showWarnings = FALSE, recursive = TRUE)
+    	dir.create(file.path(OUTPUT_DIR, "partial_dependence"),   showWarnings = FALSE, recursive = TRUE)
+  
+  	## Standard BRT parameters for the >100 occurrence tier
+  	## tc=2: pairwise interactions (ecologically meaningful, estimable at n>100)
+  	## bag.fraction=0.75: standard per Elith et al. (2008)
+  	## n.folds=10: stable fold sizes with 118+ presences
+  	## step.size=50: standard evaluation interval
+    	BRT_PARAMS <- list(
+    		tree.complexity = 2,
+    		learning.rate   = 0.001,
+    		bag.fraction    = 0.75,
+    		n.folds         = 10,
+    		family          = "bernoulli",
+    		step.size       = 50,
+    		max.trees       = 50000
+    	)
+  
+  	## The six "Standard BRT" species (>100 occurrences)
+    	STANDARD_SPECIES <- c(
+    		"Culex pipiens",
+    		"Ixodes ricinus",
+    		"Aedes albopictus",
+    		"Dermacentor marginatus",
+    		"Dermacentor reticulatus",
+    		"Aedes caspius"
+    	)
+  
+  	## Species-to-taxon mapping (determines covariate set)
+  	  MOSQUITO_SPECIES <- c("Culex pipiens", "Aedes albopictus", "Aedes caspius")
+  	  TICK_SPECIES     <- c("Ixodes ricinus", "Dermacentor marginatus", "Dermacentor reticulatus")
+  
+  	## Categorical covariate
+  	  CATEGORICAL_VAR <- "WorldCover"
+  
+  	## Mosquito covariates: climate + terrain + NDVI + wind (no soil)
+    	MOSQUITO_VARS <- c(
+    		"hurs", "pr", "sfcWind", "tas", "tasmax", "tasmin",
+    		"NDVI", "Elevation", "Slope", CATEGORICAL_VAR
+    	)
+  
+  	## Tick covariates: climate + terrain + NDVI + soil (no wind)
+    	TICK_VARS <- c(
+    		"hurs", "pr", "tas", "tasmax", "tasmin",
+    		"NDVI", "Elevation", "Slope",
+    		"BulkDensity", "CoarseFragments", "Nitrogen",
+    		"SoilpH", "SandContent", "SiltContent", "SoilOrganicCarbon",
+    		CATEGORICAL_VAR
+    	)
+  
+  
+  # ─────────────────────────────────────────────────────────────────────────────
+  # HELPER FUNCTIONS
+  # ─────────────────────────────────────────────────────────────────────────────
+  
+  	#' Retrieve appropriate covariate names for a given species
+    	get_predictor_vars <- function(species_name) {
+    		if (species_name %in% MOSQUITO_SPECIES) return(MOSQUITO_VARS)
+    		if (species_name %in% TICK_SPECIES)     return(TICK_VARS)
+    		stop("Species '", species_name, "' not found in taxon lists.")
+    	}
+  
+  
+  	#' Determine vector type label for a species
+    	get_vector_type <- function(species_name) {
+    		if (species_name %in% MOSQUITO_SPECIES) return("mosquito")
+    		if (species_name %in% TICK_SPECIES)     return("tick")
+    		stop("Species '", species_name, "' not found in taxon lists.")
+    	}
+  
+  
+  	#' Prepare a data frame for BRT modeling
+  	#' Selects response + predictors, drops NAs, converts WorldCover to factor
+    	prepare_brt_data <- function(df, predictor_vars) {
+    
+    		model_df <- df |>
+    			dplyr::select(presence, all_of(predictor_vars)) |>
+    			drop_na()
+    
+    		## Ensure WorldCover is treated as categorical
+    		if (CATEGORICAL_VAR %in% names(model_df)) {
+    			model_df <- model_df |>
+    				mutate(!!CATEGORICAL_VAR := as.factor(.data[[CATEGORICAL_VAR]]))
+    		}
+    
+    		return(model_df)
+    	}
+  
+  
+  	#' Fit a single BRT model via dismo::gbm.step()
+  	#' Returns NULL on failure rather than stopping the pipeline
+  	  fit_single_brt <- function(model_data, predictor_vars, params) {
+  
+  		## Column indices required by gbm.step
+  		  response_col   <- which(names(model_data) == "presence")
+  		  predictor_cols <- which(names(model_data) %in% predictor_vars)
+  
+  		## Fit with suppressed convergence warnings (expected for binary data)
+    		model <- tryCatch({
+    			suppressWarnings({
+    				gbm.step(
+    					data            = as.data.frame(model_data),
+    					gbm.x           = predictor_cols,
+    					gbm.y           = response_col,
+    					family           = params$family,
+    					tree.complexity  = params$tree.complexity,
+    					learning.rate    = params$learning.rate,
+    					bag.fraction     = params$bag.fraction,
+    					n.folds          = params$n.folds,
+    					step.size        = params$step.size,
+    					max.trees        = params$max.trees,
+    					plot.main        = FALSE,
+    					plot.folds       = FALSE,
+    					silent           = TRUE
+    				)
+    			})
+    		}, error = function(e) {
+    			warning("BRT fitting failed: ", e$message)
+    			return(NULL)
+    		})
+    
+    		return(model)
+    	}
+  
+  
+  	#' Extract performance statistics from a fitted gbm.step model
+    	extract_model_stats <- function(model) {
+    
+    		if (is.null(model)) {
+    			return(tibble(
+    				n_trees            = NA_integer_,
+    				cv_deviance_mean   = NA_real_,
+    				cv_deviance_se     = NA_real_,
+    				training_auc       = NA_real_,
+    				cv_auc             = NA_real_,
+    				cv_correlation     = NA_real_,
+    				deviance_explained = NA_real_
+    			))
+    		}
+  
+  		## Optimal number of trees from CV
+  		  n_trees <- model$gbm.call$best.trees
+  
+  		## CV deviance at optimal tree number
+  		  cv_deviance_mean <- model$cv.statistics$deviance.mean
+  		  cv_deviance_se   <- model$cv.statistics$deviance.se
+  
+  		## AUC: training and cross-validated
+  		  training_auc <- model$self.statistics$discrimination
+  		  cv_auc       <- model$cv.statistics$discrimination.mean
+  
+  		## CV correlation (Pearson between observed and predicted in held-out folds)
+  		  cv_correlation <- model$cv.statistics$correlation.mean
+  
+  		## Deviance explained: (null - residual) / null × 100
+  		  deviance_explained <- (1 - (model$cv.statistics$deviance.mean /
+  		                            model$self.statistics$mean.null)) * 100
+  
+    		tibble(
+    			n_trees            = n_trees,
+    			cv_deviance_mean   = cv_deviance_mean,
+    			cv_deviance_se     = cv_deviance_se,
+    			training_auc       = training_auc,
+    			cv_auc             = cv_auc,
+    			cv_correlation     = cv_correlation,
+    			deviance_explained = deviance_explained
+    		)
+    	}
+  
+  
+  	#' Extract variable importance from a fitted gbm.step model
+  	  extract_var_importance <- function(model) {
+  
+  		  if (is.null(model)) return(NULL)
+  
+  		## gbm.step stores relative influence in the summary
+    		importance <- summary(model, plotit = FALSE) |>
+    			as_tibble() |>
+    			rename(variable = var, rel_influence = rel.inf)
+    
+    		return(importance)
+    	}
+  
+  
+  	#' Extract partial dependence data for all predictors from a gbm.step model
+  	#' Returns a tibble with variable, x-value, and predicted y-value columns
+  	  extract_partial_dependence <- function(model, predictor_vars) {
+  
+  		  if (is.null(model)) return(NULL)
+  
+  		## Iterate across all predictors and extract PDP values
+    		pdp_data <- purrr::map_dfr(
+    			seq_along(predictor_vars),
+    			function(var_idx) {
+    
+    				## gbm::plot.gbm returns the PDP data invisibly
+      				pdp <- tryCatch({
+      					plot.gbm(model, i.var = var_idx, return.grid = TRUE)
+      				}, error = function(e) {
+      					return(NULL)
+      				})
+    
+    				if (is.null(pdp)) return(NULL)
+    
+    				tibble(
+    					variable = predictor_vars[var_idx],
+    					x        = as.numeric(pdp[[1]]),
+    					y        = pdp$y
+    				)
+    			}
+    		)
+    
+    		return(pdp_data)
+    	}
+  
+  # LOAD AND VALIDATE ITERATION DATA
+  	## List all iteration files
+    	iteration_files <- list.files(
+    		INPUT_DIR,
+    		pattern    = "^brt_data_iteration_\\d{3}\\.rds$",
+    		full.names = TRUE
+    	) |>
+    		sort()
+
+    	if (length(iteration_files) != 100) {
+    		warning("Expected 100 iteration files, found ", length(iteration_files))
+    	}
+  
+  	## Inspect structure from first iteration
+  	sample_data <- readRDS(iteration_files[1])
+  	available_species <- unique(sample_data$species)
+  	missing_species   <- setdiff(STANDARD_SPECIES, available_species)
+  
+  	if (length(missing_species) > 0) {
+  		stop("Missing species in iteration data: ", paste(missing_species, collapse = ", "))
+  	}
+  
+  	## Report per-species sample sizes from first iteration
+    	sample_data |>
+    		dplyr::filter(species %in% STANDARD_SPECIES) |>
+    		group_by(species) |>
+    		summarise(
+    			n_presence = sum(presence == 1),
+    			n_absence  = sum(presence == 0),
+    			n_total    = n(),
+    			.groups    = "drop"
+    		) |>
+    		arrange(desc(n_presence)) |>
+    		mutate(label = sprintf("  %-25s %4d pres / %4d abs", species, n_presence, n_absence)) |>
+    		pull(label) |>
+    		walk(cat, "\n")
+  
+  	## Print parameter configuration
+    	rm(sample_data)
+    	gc()
+  
+  # RuN SOME MORE MODELS!
+  	purrr::walk(
+  		STANDARD_SPECIES,
+  		function(sp) {
+  
+  			cat("\n───────────────────────────────────────────────────────────────────\n")
+  			cat("SPECIES:", sp, "\n")
+  			cat("───────────────────────────────────────────────────────────────────\n")
+  
+  			## Determine covariate set based on taxon
+  			  predictor_vars <- get_predictor_vars(sp)
+  			  vector_type    <- get_vector_type(sp)
+  
+  			cat("  Vector type:", vector_type, "\n")
+  			cat("  Predictors: ", length(predictor_vars), "\n")
+  
+  			## Pre-allocate result containers
+    			all_models <- vector("list", length(iteration_files))
+    			all_stats  <- vector("list", length(iteration_files))
+    			all_varimp <- vector("list", length(iteration_files))
+    			all_pdp    <- vector("list", length(iteration_files))
+    
+  			n_failed <- 0L
+  
+  			## Track timing for progress estimates
+  			  t_start <- Sys.time()
+  
+    			purrr::walk(
+    				seq_along(iteration_files),
+    				function(i) {
+    
+    					## Progress reporting every 10 iterations + timing estimate
+    					if (i %% 10 == 1 || i == length(iteration_files)) {
+    						elapsed <- as.numeric(difftime(Sys.time(), t_start, units = "mins"))
+    						if (i > 1) {
+    							rate <- elapsed / (i - 1)
+    							remaining <- rate * (length(iteration_files) - i)
+    							cat(sprintf("  Iteration %3d / %d  [%.1f min elapsed, ~%.1f min remaining]\n",
+    							            i, length(iteration_files), elapsed, remaining))
+    						} else {
+    							cat(sprintf("  Iteration %3d / %d ...\n", i, length(iteration_files)))
+    						}
+    					}
+  
+  					## Load this iteration and filter to target species
+  					  iter_data <- readRDS(iteration_files[i]) |>
+  						  dplyr::filter(species == sp)
+  
+  					## Prepare for modeling
+  					  model_data <- prepare_brt_data(iter_data, predictor_vars)
+  
+  					## Report sample size on first iteration
+    					if (i == 1) {
+    						n_pres <- sum(model_data$presence == 1)
+    						n_abs  <- sum(model_data$presence == 0)
+    						cat(sprintf("  Sample size: %d presences, %d pseudo-absences\n", n_pres, n_abs))
+    					}
+  
+  					## Fit BRT
+  					  model <- fit_single_brt(model_data, predictor_vars, BRT_PARAMS)
+  
+  					## Track failures
+    					if (is.null(model)) {
+    						n_failed <<- n_failed + 1L
+    					}
+  
+  					## Store model object
+  					all_models[[i]] <<- model
+  
+  					## Extract statistics
+    					all_stats[[i]] <<- extract_model_stats(model) |>
+    						mutate(iteration = i)
+  
+  					## Extract variable importance
+    					varimp <- extract_var_importance(model)
+    					if (!is.null(varimp)) {
+    						all_varimp[[i]] <<- varimp |>
+    							mutate(iteration = i)
+    					}
+  
+  					## Extract partial dependence
+    					pdp <- extract_partial_dependence(model, predictor_vars)
+    					if (!is.null(pdp)) {
+    						all_pdp[[i]] <<- pdp |>
+    							mutate(iteration = i)
+    					}
+  
+  					## Free memory
+  					rm(iter_data, model_data, model)
+  				}
+  			) ## End iteration loop
+  
+  			## Report completion
+    			total_time <- as.numeric(difftime(Sys.time(), t_start, units = "mins"))
+    			cat(sprintf("\n  Completed: %d models fit, %d failures (%.1f min total)\n",
+    			            length(iteration_files) - n_failed, n_failed, total_time))
+  
+  
+  			# COMPILE AND SAVE STATISTICS
+
+    			## Per-iteration statistics
+      			species_stats <- bind_rows(all_stats) |>
+      				mutate(
+      					species     = sp,
+      					vector_type = vector_type,
+      					.before     = everything()
+      				)
+  
+  			## Summary across iterations
+    			species_summary <- species_stats |>
+    				dplyr::filter(!is.na(n_trees)) |>
+    				summarise(
+    					species                 = first(species),
+    					vector_type             = first(vector_type),
+    					n_models                = n(),
+    					n_failed                = n_failed,
+    					n_trees_mean            = mean(n_trees),
+    					n_trees_sd              = sd(n_trees),
+    					n_trees_min             = min(n_trees),
+    					n_trees_max             = max(n_trees),
+    					cv_deviance_mean        = mean(cv_deviance_mean),
+    					cv_deviance_sd          = sd(cv_deviance_mean),
+    					training_auc_mean       = mean(training_auc),
+    					training_auc_sd         = sd(training_auc),
+    					cv_auc_mean             = mean(cv_auc),
+    					cv_auc_sd               = sd(cv_auc),
+    					cv_correlation_mean     = mean(cv_correlation),
+    					cv_correlation_sd       = sd(cv_correlation),
+    					deviance_explained_mean = mean(deviance_explained),
+    					deviance_explained_sd   = sd(deviance_explained),
+    					.groups                 = "drop"
+    				)
+  
+  			## Print summary
+  			cat(sprintf("    CV AUC:             %.4f ± %.4f\n",
+  			            species_summary$cv_auc_mean, species_summary$cv_auc_sd))
+  			cat(sprintf("    Training AUC:       %.4f ± %.4f\n",
+  			            species_summary$training_auc_mean, species_summary$training_auc_sd))
+  			cat(sprintf("    Deviance explained: %.2f%% ± %.2f%%\n",
+  			            species_summary$deviance_explained_mean, species_summary$deviance_explained_sd))
+  			cat(sprintf("    Optimal trees:      %.0f ± %.0f (range: %d – %d)\n",
+  			            species_summary$n_trees_mean, species_summary$n_trees_sd,
+  			            species_summary$n_trees_min, species_summary$n_trees_max))
+  
+  			## Overfitting diagnostic: training-CV AUC gap
+    			auc_gap <- species_summary$training_auc_mean - species_summary$cv_auc_mean
+  
+  			# ─────────────────────────────────────────────────────────────────
+  			# COMPILE VARIABLE IMPORTANCE
+  			# ─────────────────────────────────────────────────────────────────
+  
+  			species_varimp_raw <- bind_rows(compact(all_varimp))
+  
+  			species_varimp_summary <- species_varimp_raw |>
+  				group_by(variable) |>
+  				summarise(
+  					mean_influence = mean(rel_influence),
+  					sd_influence   = sd(rel_influence),
+  					min_influence  = min(rel_influence),
+  					max_influence  = max(rel_influence),
+  					.groups        = "drop"
+  				) |>
+  				arrange(desc(mean_influence)) |>
+  				mutate(
+  					species     = sp,
+  					vector_type = vector_type,
+  					.before     = everything()
+  				)
+  
+  			cat("\n  Top 5 variables:\n")
+  			species_varimp_summary |>
+  				slice_head(n = 5) |>
+  				mutate(label = sprintf("    %s: %.2f%% ± %.2f%%", variable,
+  				                       mean_influence, sd_influence)) |>
+  				pull(label) |>
+  				walk(cat, "\n")
+  
+  
+  			# ─────────────────────────────────────────────────────────────────
+  			# COMPILE AVERAGED PARTIAL DEPENDENCE PLOTS
+  			# ─────────────────────────────────────────────────────────────────
+  
+  			species_pdp_raw <- bind_rows(compact(all_pdp))
+  
+  			species_pdp_averaged <- species_pdp_raw |>
+  				group_by(variable) |>
+  				mutate(x_bin = cut(x, breaks = 50, labels = FALSE)) |>
+  				group_by(variable, x_bin) |>
+  				summarise(
+  					x_mean  = mean(x),
+  					y_mean  = mean(y),
+  					y_sd    = sd(y),
+  					y_lower = y_mean - y_sd,
+  					y_upper = y_mean + y_sd,
+  					.groups = "drop"
+  				) |>
+  				mutate(
+  					species     = sp,
+  					vector_type = vector_type,
+  					.before     = everything()
+  				)
+  
+  
+  			# ─────────────────────────────────────────────────────────────────
+  			# SAVE ALL OUTPUTS
+  			# ─────────────────────────────────────────────────────────────────
+  
+  			sp_clean <- str_replace_all(sp, " ", "_")
+  
+  			## Model objects (list of 100 gbm.step objects)
+    			saveRDS(
+    				all_models,
+    				file = file.path(OUTPUT_DIR, "models",
+    				                 paste0(sp_clean, "_standard_brt_models.rds"))
+    			)
+  
+  			## Per-iteration statistics
+    			saveRDS(
+    				species_stats,
+    				file = file.path(OUTPUT_DIR, "statistics",
+    				                 paste0(sp_clean, "_iteration_stats.rds"))
+    			)
+  
+  			## Summary statistics
+    			saveRDS(
+    				species_summary,
+    				file = file.path(OUTPUT_DIR, "statistics",
+    				                 paste0(sp_clean, "_summary_stats.rds"))
+    			)
+  
+  			## Variable importance (raw + summary)
+    			saveRDS(
+    				list(raw = species_varimp_raw, summary = species_varimp_summary),
+    				file = file.path(OUTPUT_DIR, "statistics",
+    				                 paste0(sp_clean, "_variable_importance.rds"))
+    			)
+  
+  			## Averaged PDP data
+    			saveRDS(
+    				species_pdp_averaged,
+    				file = file.path(OUTPUT_DIR, "partial_dependence",
+    				                 paste0(sp_clean, "_averaged_pdp.rds"))
+    			)
+  
+  			## Free memory
+    			rm(all_models, all_stats, all_varimp, all_pdp,
+    			   species_stats, species_summary, species_varimp_raw,
+    			   species_varimp_summary, species_pdp_raw, species_pdp_averaged)
+    			gc()
+    		}
+  	) ## End species loop
+  
+  # COMPILE CROSS-SPECIES SUMMARY TABLE
+
+  	summary_files <- list.files(
+  		file.path(OUTPUT_DIR, "statistics"),
+  		pattern    = "_summary_stats\\.rds$",
+  		full.names = TRUE
+  	)
+  
+  	cross_species_summary <- purrr::map_dfr(summary_files, readRDS) |>
+  		arrange(desc(cv_auc_mean))
+  
+  	## Formatted output with overfitting diagnostic
+    	cross_species_summary |>
+    		mutate(
+    			auc_gap = training_auc_mean - cv_auc_mean,
+    			flag    = if_else(auc_gap > 0.02, "⚠", "✓"),
+    			label   = sprintf(
+    				"  %-25s  CV AUC: %.4f ± %.4f  |  Gap: %.4f %s  |  DevExpl: %5.1f%%  |  Trees: %5.0f ± %4.0f",
+    				species, cv_auc_mean, cv_auc_sd,
+    				auc_gap, flag,
+    				deviance_explained_mean,
+    				n_trees_mean, n_trees_sd
+    			)
+    		) |>
+    		pull(label) |>
+    		walk(cat, "\n")
+  
+  	## Save combined summary
+    	saveRDS(
+    		cross_species_summary,
+    		file = file.path(OUTPUT_DIR, "statistics", "standard_brt_cross_species_summary.rds")
+    	)
+  
+    	write_csv(
+    		cross_species_summary,
+    		file = file.path(OUTPUT_DIR, "statistics", "standard_brt_cross_species_summary.csv")
+    	)
+
+```
+
+```{r Baseline and Monthly Predictions — Tuned BRT + ESM Species}
+
+  set.seed(1999)
+  
+  # CONFIGURATION
+
+	## Output root — predictions saved here in Baseline/ and Monthly/ subfolders
+    PREDICTION_DIR <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_Data/Predictions"
+
+  	dir.create(file.path(PREDICTION_DIR, "Baseline"), showWarnings = FALSE, recursive = TRUE)
+  	dir.create(file.path(PREDICTION_DIR, "Monthly"),  showWarnings = FALSE, recursive = TRUE)
+
+	## Saved model locations
+  	TUNED_BRT_MODEL_DIR <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_BRTs_New/Tuned_BRT_Results/models"
+  	ESM_MODEL_DIR       <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks/Paper2_ESMs"
+
+	## Species lists
+  	TUNED_BRT_SPECIES <- c(
+  		"Aedes vexans",
+  		"Culex theileri",
+  		"Haemaphysalis inermis",
+  		"Hyalomma marginatum"
+  	)
+
+  	ESM_SPECIES <- c(
+  		"Aedes aegypti", "Aedes geniculatus",
+  		"Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
+  		"Culex tritaeniorhynchus", "Culiseta annulata", "Culiseta longiareolata",
+  		"Hyalomma aegyptium", "Rhipicephalus sanguineus"
+  	)
+
+	## Taxon-to-covariate mapping
+  	TUNED_BRT_MOSQUITO <- c("Aedes vexans", "Culex theileri")
+  	TUNED_BRT_TICK     <- c("Haemaphysalis inermis", "Hyalomma marginatum")
+  	ESM_TICK           <- c("Hyalomma aegyptium", "Rhipicephalus sanguineus")
+
+	## Covariate sets (must match layer names in raster stacks)
+  	MOSQUITO_COVARIATES <- c(
+  		"hurs", "pr", "sfcWind", "tas", "tasmax", "tasmin",
+  		"NDVI", "Elevation", "Slope", "WorldCover"
+  	)
+
+  	TICK_COVARIATES <- c(
+  		"hurs", "pr", "tas", "tasmax", "tasmin",
+  		"NDVI", "Elevation", "Slope",
+  		"BulkDensity", "CoarseFragments", "Nitrogen",
+  		"SoilpH", "SandContent", "SiltContent", "SoilOrganicCarbon",
+  		"WorldCover"
+  	)
+
+	## Clean month labels from the monthly_rasters list names
+	## Converts "Georgia_Covariates_Jan" → "Jan", etc.
+  	MONTH_LABELS <- gsub("Georgia_Covariates_", "", names(monthly_rasters))
+  	names(MONTH_LABELS) <- names(monthly_rasters)
+
+	## Ordered month sequence for consistent output
+  	MONTH_ORDER <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  	                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+# HELPER FUNCTIONS
+
+	#' Get the correct covariate vector for a given species
+  	get_covariates_for_species <- function(sp_name) {
+  		if (sp_name %in% c(TUNED_BRT_MOSQUITO)) return(MOSQUITO_COVARIATES)
+  		if (sp_name %in% c(TUNED_BRT_TICK))     return(TICK_COVARIATES)
+  		if (sp_name %in% ESM_TICK)               return(TICK_COVARIATES)
+  		## Default: ESM mosquitoes
+  		return(MOSQUITO_COVARIATES)
+  	}
+
+
+	#' Prepare a raster for BRT prediction by subsetting layers and factoring WorldCover
+  	prepare_raster_for_brt <- function(rast_stack, covariates) {
+  
+  		## Subset to the covariates this species needs
+  		  proj_raster <- rast_stack[[covariates]]
+  
+  		## Ensure WorldCover is treated as a factor
+    		if ("WorldCover" %in% names(proj_raster)) {
+    			proj_raster[["WorldCover"]] <- as.factor(proj_raster[["WorldCover"]])
+    		}
+  
+  		return(proj_raster)
+  	}
+
+
+	#' Generate mean + SD prediction from a list of 100 BRT models
+	#' Returns a two-layer SpatRaster (mean, sd) on the probability scale
+  	predict_brt_ensemble <- function(model_list, proj_raster) {
+  
+  		## Predict from each valid model
+    		pred_stack <- model_list |>
+    			compact() |>
+    			map(function(mod) {
+    				tryCatch({
+    					terra::predict(
+    						proj_raster,
+    						mod,
+    						n.trees = mod$gbm.call$best.trees,
+    						type    = "response",
+    						na.rm   = TRUE
+    					)
+    				}, error = function(e) {
+    					warning("  Single BRT prediction failed: ", e$message)
+    					return(NULL)
+    				})
+    			}) |>
+    			compact() |>
+    			rast()
+
+  		## Pixel-wise mean and SD across the 100 models
+  		  mean_rast <- app(pred_stack, mean, na.rm = TRUE)
+  		  sd_rast   <- app(pred_stack, sd,   na.rm = TRUE)
+  
+  		## Name the layers for consistency with existing output convention
+  		  names(mean_rast) <- "mean"
+  		  names(sd_rast)   <- "sd"
+  
+  		return(c(mean_rast, sd_rast))
+  	}
+
+
+	#' Run ecospat ESM projection + ensemble projection for one raster surface
+	#' Returns a single-layer SpatRaster on the 0–1 probability scale
+  	project_esm_to_raster <- function(esm_model, esm_ensemble, proj_raster) {
+  
+  		## Bivariate projections (one per predictor pair)
+    		biv_proj <- ecospat.ESM.Projection(
+    			ESM.modeling.output = esm_model,
+    			new.env             = proj_raster,
+    			parallel            = FALSE
+    		)
+  
+  		## Weighted ensemble across bivariate models (0–1000 scale)
+    		ens_proj <- ecospat.ESM.EnsembleProjection(
+    			ESM.prediction.output       = biv_proj,
+    			ESM.EnsembleModeling.output = esm_ensemble
+    		)
+  
+  		## Rescale from 0–1000 to 0–1 probability
+  		  ens_proj <- ens_proj / 1000
+  
+  		  names(ens_proj) <- "mean"
+  
+  		  return(ens_proj)
+  	}
+
+
+# PART 1: TUNED BRT PREDICTIONS (4 species × 100 models each)
+
+  	purrr::walk(TUNED_BRT_SPECIES, function(sp) {
+  
+  		sp_clean   <- gsub(" ", "_", sp)
+  		covariates <- get_covariates_for_species(sp)
+  		sp_start   <- Sys.time()
+  
+  		cat("───────────────────────────────────────────────────────────────────\n")
+  		cat("SPECIES:", sp, "\n")
+  		cat("  Covariates:", length(covariates), "\n")
+  
+  		## Load saved model objects (list of 100 gbm.step objects)
+  		model_path <- file.path(
+  			TUNED_BRT_MODEL_DIR,
+  			paste0(sp_clean, "_tuned_brt_models.rds")
+  		)
+  
+  		if (!file.exists(model_path)) {
+  			cat("  ⚠ Model file not found:", model_path, "\n")
+  			cat("  Skipping this species.\n\n")
+  			return(invisible())
+  		}
+  
+  		models <- readRDS(model_path)
+  		n_valid <- sum(!map_lgl(models, is.null))
+  		cat("  Loaded", n_valid, "valid models out of", length(models), "\n")
+  
+  
+  		## ── Baseline prediction ──────────────────────────────────────────
+  		cat("  Predicting baseline...\n")
+  
+  		baseline_proj <- prepare_raster_for_brt(baseline_raster, covariates)
+  		baseline_pred <- predict_brt_ensemble(models, baseline_proj)
+  
+  		writeRaster(
+  			baseline_pred,
+  			file.path(PREDICTION_DIR, "Baseline", paste0(sp_clean, "_baseline.tif")),
+  			overwrite = TRUE
+  		)
+  
+  		cat("    ✓ Baseline saved (",
+  		    round(minmax(baseline_pred[["mean"]])[2], 3), "max prob )\n")
+  
+  
+  		## ── Monthly predictions ──────────────────────────────────────────
+  		cat("  Predicting monthly surfaces...\n")
+  
+  		## Create species-specific monthly output folder
+  		monthly_sp_dir <- file.path(PREDICTION_DIR, "Monthly", sp_clean)
+  		dir.create(monthly_sp_dir, showWarnings = FALSE, recursive = TRUE)
+  
+  		## Iterate across months in calendar order
+  		purrr::walk(MONTH_ORDER, function(month_label) {
+  
+  			## Find the matching raster key in monthly_rasters
+  			raster_key <- paste0("Georgia_Covariates_", month_label)
+  
+  			if (!raster_key %in% names(monthly_rasters)) {
+  				cat("    ⚠ Missing raster for:", month_label, "\n")
+  				return(invisible())
+  			}
+  
+  			month_proj <- prepare_raster_for_brt(
+  				monthly_rasters[[raster_key]], covariates
+  			)
+  			month_pred <- predict_brt_ensemble(models, month_proj)
+  
+  			writeRaster(
+  				month_pred,
+  				file.path(monthly_sp_dir, paste0(sp_clean, "_", month_label, ".tif")),
+  				overwrite = TRUE
+  			)
+  
+  			cat("    ✓", month_label, "\n")
+  		})
+  
+  		## Free memory
+  		rm(models, baseline_proj, baseline_pred)
+  		gc()
+  
+  		elapsed <- round(difftime(Sys.time(), sp_start, units = "mins"), 1)
+  		cat("  Done (", elapsed, "min )\n\n")
+  	})
+
+
+# PART 2: ESM PREDICTIONS (10 species)
+  	
+	purrr::walk(ESM_SPECIES, function(sp) {
+
+		sp_clean <- gsub(" ", "_", sp)
+		sp_start <- Sys.time()
+
+		## Load saved ESM model objects
+		  model_path <- file.path(ESM_MODEL_DIR, sp_clean, "esm_model_objects.rds")
+
+  		if (!file.exists(model_path)) {
+  			cat("  ⚠ Model file not found:", model_path, "\n")
+  			cat("  Skipping this species.\n\n")
+  			return(invisible())
+  		}
+
+  		esm_objs     <- readRDS(model_path)
+  		esm_model    <- esm_objs$esm_model
+  		esm_ensemble <- esm_objs$esm_ensemble
+  		covariates   <- esm_objs$covariates
+
+		## ── Baseline prediction ──────────────────────────────────────────
+
+		## Subset baseline raster to the covariates the ESM was trained on
+  		baseline_proj <- baseline_raster[[covariates]]
+
+  		baseline_pred <- tryCatch({
+  			project_esm_to_raster(esm_model, esm_ensemble, baseline_proj)
+  		}, error = function(e) {
+  			cat("    ✗ Baseline projection failed:", e$message, "\n")
+  			return(NULL)
+  		})
+
+  		if (!is.null(baseline_pred)) {
+  			writeRaster(
+  				baseline_pred,
+  				file.path(PREDICTION_DIR, "Baseline", paste0(sp_clean, "_baseline.tif")),
+  				overwrite = TRUE
+  			)
+  			cat("    ✓ Baseline saved (",
+  			    round(minmax(baseline_pred)[2], 3), "max prob )\n")
+  		}
+
+
+		## ── Monthly predictions ──────────────────────────────────────────
+  		monthly_sp_dir <- file.path(PREDICTION_DIR, "Monthly", sp_clean)
+  		dir.create(monthly_sp_dir, showWarnings = FALSE, recursive = TRUE)
+
+  		purrr::walk(MONTH_ORDER, function(month_label) {
+  
+  			raster_key <- paste0("Georgia_Covariates_", month_label)
+  
+  			if (!raster_key %in% names(monthly_rasters)) {
+  				cat("    ⚠ Missing raster for:", month_label, "\n")
+  				return(invisible())
+  			}
+
+			## Subset monthly raster to ESM covariates
+			  month_proj <- monthly_rasters[[raster_key]][[covariates]]
+
+  			month_pred <- tryCatch({
+  				project_esm_to_raster(esm_model, esm_ensemble, month_proj)
+  			}, error = function(e) {
+  				cat("    ✗", month_label, "projection failed:", e$message, "\n")
+  				return(NULL)
+  			})
+
+  			if (!is.null(month_pred)) {
+  				writeRaster(
+  					month_pred,
+  					file.path(monthly_sp_dir,
+  					          paste0(sp_clean, "_", month_label, ".tif")),
+  					overwrite = TRUE
+  				)
+  				cat("    ✓", month_label, "\n")
+  			}
+  		})
+
+		## Free memory
+  		rm(esm_objs, esm_model, esm_ensemble, baseline_proj, baseline_pred)
+  		gc()
+
+  		elapsed <- round(difftime(Sys.time(), sp_start, units = "mins"), 1)
+  		cat("  Done (", elapsed, "min )\n\n")
+  	})
+
+
+# SUMMARY
+
+	## Count output files
+  	n_baseline <- length(list.files(
+  		file.path(PREDICTION_DIR, "Baseline"),
+  		pattern = "\\.tif$"
+  	))
+  	n_monthly <- length(list.files(
+  		file.path(PREDICTION_DIR, "Monthly"),
+  		pattern = "\\.tif$",
+  		recursive = TRUE
+  	))
+```
+
+```{r Model Evaluation and Landscape Summaries}
+
+set.seed(1999)
+
+# CONFIGURATION
+
+	## Base paths
+  	ONEDRIVE     <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks"
+  	PREDICT_DIR  <- file.path(ONEDRIVE, "Paper2_Data/Predictions")
+  	OUTPUT_DIR   <- file.path(ONEDRIVE, "Paper2_Data/Summaries")
+  	dir.create(OUTPUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+	## Model object paths by tier
+  	STANDARD_BRT_MODEL_DIR <- file.path(PREDICT_DIR, "Models")
+  	TUNED_BRT_MODEL_DIR    <- file.path(ONEDRIVE, "Paper2_BRTs_New/Tuned_BRT_Results/models")
+  	ESM_MODEL_DIR          <- file.path(ONEDRIVE, "Paper2_ESMs")
+
+	## Baseline prediction rasters
+	  BASELINE_DIR <- file.path(PREDICT_DIR, "Baseline")
+
+	## Master extracted covariates file
+	  SDM_EXTRACTED_PATH <- "C:/Users/ianpsheasmith/Documents/GitHub/GVecVuln/data/SDM_Data/sdm_extracted_covariates.rds"
+
+	## Species lists by modeling tier
+  	STANDARD_BRT_SPECIES <- c(
+  		"Culex pipiens", "Ixodes ricinus", "Aedes albopictus",
+  		"Dermacentor marginatus", "Dermacentor reticulatus", "Aedes caspius"
+  	)
+
+  	TUNED_BRT_SPECIES <- c(
+  		"Aedes vexans", "Culex theileri",
+  		"Haemaphysalis inermis", "Hyalomma marginatum"
+  	)
+
+  	ESM_SPECIES <- c(
+  		"Aedes aegypti", "Aedes geniculatus",
+  		"Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
+  		"Culex tritaeniorhynchus", "Culiseta annulata", "Culiseta longiareolata",
+  		"Hyalomma aegyptium", "Rhipicephalus sanguineus"
+  	)
+
+	## All species combined
+	  ALL_SPECIES <- c(STANDARD_BRT_SPECIES, TUNED_BRT_SPECIES, ESM_SPECIES)
+
+
+# HELPER FUNCTIONS
+
+	#' Extract per-iteration evaluation metrics from a single gbm.step model
+	#' Returns CV AUC, training AUC, deviance explained, TSS, and n_presences
+  	extract_brt_metrics <- function(model) {
+  
+  		if (is.null(model)) {
+  			return(tibble(
+  				cv_auc             = NA_real_,
+  				training_auc       = NA_real_,
+  				deviance_explained = NA_real_,
+  				tss                = NA_real_,
+  				n_presences        = NA_integer_
+  			))
+  		}
+
+		## Training predictions and observed response
+		  preds <- model$fitted
+		  obs   <- model$gbm.call$dataframe[[model$gbm.call$gbm.y]]
+
+		## dismo evaluation object for TSS computation
+  		eval_obj <- tryCatch(
+  			dismo::evaluate(p = preds[obs == 1], a = preds[obs == 0]),
+  			error = function(e) NULL
+  		)
+
+		## TSS = max(sensitivity + specificity - 1) across all thresholds
+  		tss_val <- if (!is.null(eval_obj)) {
+  			max(eval_obj@TPR + eval_obj@TNR - 1, na.rm = TRUE)
+  		} else NA_real_
+
+		## gbm.step internal performance metrics
+  		cv_auc  <- model$cv.statistics$discrimination.mean
+  		tr_auc  <- model$self.statistics$discrimination
+  		dev_exp <- (1 - (model$cv.statistics$deviance.mean /
+  		                 model$self.statistics$mean.null)) * 100
+  
+  		tibble(
+  			cv_auc             = cv_auc,
+  			training_auc       = tr_auc,
+  			deviance_explained = dev_exp,
+  			tss                = tss_val,
+  			n_presences        = as.integer(sum(obs == 1))
+  		)
+  	}
+
+
+	#' Process all 100 BRT models for one species: extract per-iteration
+	#' metrics and return summary statistics (mean ± SD)
+	#' Boyce index is computed separately from ensemble rasters (see below)
+  	summarise_brt_species <- function(sp_name, model_list, tier) {
+  
+  		cat("  Extracting metrics from", sum(!map_lgl(model_list, is.null)),
+  		    "models...\n")
+  
+  		## Extract metrics from each iteration
+    		iter_metrics <- model_list |>
+    			map_dfr(extract_brt_metrics)
+  
+  		## Summarise across iterations
+  		tibble(
+  			species                 = sp_name,
+  			modeling_tier           = tier,
+  			n_occurrences           = iter_metrics$n_presences[1],
+  			cv_auc_mean             = mean(iter_metrics$cv_auc, na.rm = TRUE),
+  			cv_auc_sd               = sd(iter_metrics$cv_auc, na.rm = TRUE),
+  			training_auc_mean       = mean(iter_metrics$training_auc, na.rm = TRUE),
+  			training_auc_sd         = sd(iter_metrics$training_auc, na.rm = TRUE),
+  			deviance_explained_mean = mean(iter_metrics$deviance_explained, na.rm = TRUE),
+  			deviance_explained_sd   = sd(iter_metrics$deviance_explained, na.rm = TRUE),
+  			tss_mean                = mean(iter_metrics$tss, na.rm = TRUE),
+  			tss_sd                  = sd(iter_metrics$tss, na.rm = TRUE),
+  			boyce_mean              = NA_real_,
+  			boyce_sd                = NA_real_
+  		)
+  	}
+
+
+	#' Compute Boyce index for a BRT species using the ensemble mean raster
+	#' and occurrence coordinates extracted from the master PA dataset
+	#' Returns a single Boyce correlation value (Spearman cor of P/E ratio)
+  	compute_brt_boyce <- function(sp_name, pres_coords_sf, baseline_dir) {
+  
+  		sp_clean <- gsub(" ", "_", sp_name)
+  
+  		## Load baseline ensemble mean raster
+  		baseline_path <- file.path(baseline_dir, paste0(sp_clean, "_baseline.tif"))
+  		if (!file.exists(baseline_path)) {
+  			cat("    ⚠ Baseline raster not found\n")
+  			return(NA_real_)
+  		}
+  
+  		pred_rast <- rast(baseline_path)
+  		mean_rast <- if (nlyr(pred_rast) >= 2) pred_rast[[1]] else pred_rast
+  
+  		## Full landscape predicted values (background distribution)
+  		fit_vals <- values(mean_rast, na.rm = TRUE) |> as.numeric()
+  
+  		## Convert presence coords to SpatVector for extraction
+  		pres_vect <- vect(pres_coords_sf)
+  
+  		## Extract ensemble predictions at known occurrence locations
+  		obs_vals <- terra::extract(mean_rast, pres_vect)[[2]] |>
+  			na.omit() |>
+  			as.numeric()
+  
+  		if (length(obs_vals) < 5) {
+  			cat("    ⚠ Too few valid presence extractions for Boyce\n")
+  			return(NA_real_)
+  		}
+  
+  		## Boyce index (predicted-to-expected ratio correlation)
+  		boyce_result <- tryCatch(
+  			ecospat::ecospat.boyce(
+  				fit     = fit_vals,
+  				obs     = obs_vals,
+  				PEplot  = FALSE
+  			),
+  			error = function(e) {
+  				cat("    ⚠ Boyce computation failed:", e$message, "\n")
+  				NULL
+  			}
+  		)
+  
+  		if (!is.null(boyce_result)) boyce_result$cor else NA_real_
+  	}
+
+
+	#' Extract evaluation metrics from a saved ESM model object
+	#' ESMs store AUC, TSS, and Boyce in the ensemble evaluation output
+  	summarise_esm_species <- function(sp_name, esm_objs) {
+  
+  		esm_ensemble <- esm_objs$esm_ensemble
+  
+  		## Evaluation metrics from ecospat ensemble
+  		evals <- esm_ensemble$ESM.evaluations
+  
+  		auc_vals   <- evals$AUC
+  		tss_vals   <- evals$TSS
+  		boyce_vals <- evals$Boyce
+  
+  		## Attempt to extract n_occurrences from ESM model objects
+  		## The BIOMOD formatted data stores presence count; exact accessor
+  		## depends on your ESM object structure — adjust as needed
+  		n_occ <- tryCatch({
+  			if (!is.null(esm_objs$n_presences)) {
+  				as.integer(esm_objs$n_presences)
+  			} else if (!is.null(esm_objs$biomod_data)) {
+  				## biomod2 formatted data stores coords for presences
+  				sum(esm_objs$biomod_data@data.species == 1, na.rm = TRUE)
+  			} else {
+  				NA_integer_
+  			}
+  		}, error = function(e) NA_integer_)
+  
+  		tibble(
+  			species                 = sp_name,
+  			modeling_tier           = "ESM",
+  			n_occurrences           = n_occ,
+  			cv_auc_mean             = mean(auc_vals, na.rm = TRUE),
+  			cv_auc_sd               = sd(auc_vals, na.rm = TRUE),
+  			training_auc_mean       = NA_real_,
+  			training_auc_sd         = NA_real_,
+  			deviance_explained_mean = NA_real_,
+  			deviance_explained_sd   = NA_real_,
+  			tss_mean                = mean(tss_vals, na.rm = TRUE),
+  			tss_sd                  = sd(tss_vals, na.rm = TRUE),
+  			boyce_mean              = mean(boyce_vals, na.rm = TRUE),
+  			boyce_sd                = sd(boyce_vals, na.rm = TRUE)
+  		)
+  	}
+
+
+# PART 1: EXTRACT EVALUATION METRICS
+	standard_brt_summary <- purrr::map_dfr(STANDARD_BRT_SPECIES, function(sp) {
+
+		sp_clean <- gsub(" ", "_", sp)
+		cat(sp, "\n")
+
+		model_path <- file.path(STANDARD_BRT_MODEL_DIR,
+		                        paste0(sp_clean, "_models.rds"))
+
+		if (!file.exists(model_path)) {
+			cat("  ⚠ Model file not found, skipping\n")
+			return(tibble(
+				species = sp, modeling_tier = "Standard_BRT",
+				n_occurrences = NA_integer_,
+				cv_auc_mean = NA, cv_auc_sd = NA,
+				training_auc_mean = NA, training_auc_sd = NA,
+				deviance_explained_mean = NA, deviance_explained_sd = NA,
+				tss_mean = NA, tss_sd = NA,
+				boyce_mean = NA, boyce_sd = NA
+			))
+		}
+
+		models <- readRDS(model_path)
+		result <- summarise_brt_species(sp, models, "Standard_BRT")
+
+		rm(models); gc()
+		return(result)
+	})
+
+  	tuned_brt_summary <- purrr::map_dfr(TUNED_BRT_SPECIES, function(sp) {
+  
+  		sp_clean <- gsub(" ", "_", sp)
+  		cat(sp, "\n")
+  
+  		model_path <- file.path(TUNED_BRT_MODEL_DIR,
+  		                        paste0(sp_clean, "_tuned_brt_models.rds"))
+  
+  		if (!file.exists(model_path)) {
+  			cat("  ⚠ Model file not found, skipping\n")
+  			return(tibble(
+  				species = sp, modeling_tier = "Tuned_BRT",
+  				n_occurrences = NA_integer_,
+  				cv_auc_mean = NA, cv_auc_sd = NA,
+  				training_auc_mean = NA, training_auc_sd = NA,
+  				deviance_explained_mean = NA, deviance_explained_sd = NA,
+  				tss_mean = NA, tss_sd = NA,
+  				boyce_mean = NA, boyce_sd = NA
+  			))
+  		}
+  
+  		models <- readRDS(model_path)
+  		result <- summarise_brt_species(sp, models, "Tuned_BRT")
+  
+  		rm(models); gc()
+  		return(result)
+  	})
+
+	sdm_extracted <- readRDS(SDM_EXTRACTED_PATH)
+
+	brt_presence_coords <- sdm_extracted |>
+		purrr::pmap(function(scientific_name, extracted_sets, ...) {
+
+			## Pull the first iteration's data frame
+			  first_set <- extracted_sets[[1]]
+
+			## Filter to presence records and retain coordinates
+  			pres_sf <- first_set |>
+  				filter(presence == 1) |>
+  				dplyr::select(longitude, latitude) |>
+  				st_as_sf(
+  					coords = c("longitude", "latitude"),
+  					crs    = 4326
+  				)
+
+  			tibble(species = scientific_name, pres_coords = list(pres_sf))
+  		}) |>
+  		list_rbind() |>
+  		deframe()
+
+	## Compute Boyce for each BRT species and join back to summaries
+  	ALL_BRT_SPECIES <- c(STANDARD_BRT_SPECIES, TUNED_BRT_SPECIES)
+  
+  	brt_boyce_values <- purrr::map_dbl(ALL_BRT_SPECIES, function(sp) {
+  
+  		cat("  ", sp, "...")
+  
+  		## Look up presence coordinates for this species
+    		if (!sp %in% names(brt_presence_coords)) {
+    			cat(" ⚠ Not found in sdm_extracted — check SDM_EXTRACTED_PATH\n")
+    			return(NA_real_)
+    		}
+    
+    		boyce_val <- compute_brt_boyce(
+    			sp_name      = sp,
+    			pres_coords_sf = brt_presence_coords[[sp]],
+    			baseline_dir = BASELINE_DIR
+    		)
+  
+    		cat(" Boyce:", round(boyce_val, 3), "\n")
+    		boyce_val
+    	}) |>
+    		set_names(ALL_BRT_SPECIES)
+  
+  	## Update BRT summaries with Boyce values (SD remains NA — single estimate)
+    	standard_brt_summary <- standard_brt_summary |>
+    		mutate(
+    			boyce_mean = brt_boyce_values[species]
+    		)
+  
+    	tuned_brt_summary <- tuned_brt_summary |>
+    		mutate(
+    			boyce_mean = brt_boyce_values[species]
+    		)
+  
+  	## Clean up the large PA dataset
+  	  rm(sdm_extracted, brt_presence_coords); gc()
+
+	esm_summary <- purrr::map_dfr(ESM_SPECIES, function(sp) {
+
+		sp_clean <- gsub(" ", "_", sp)
+		cat(sp, "\n")
+
+		model_path <- file.path(ESM_MODEL_DIR, sp_clean, "esm_model_objects.rds")
+
+		if (!file.exists(model_path)) {
+			cat("  ⚠ Model file not found, skipping\n")
+			return(tibble(
+				species = sp, modeling_tier = "ESM",
+				n_occurrences = NA_integer_,
+				cv_auc_mean = NA, cv_auc_sd = NA,
+				training_auc_mean = NA, training_auc_sd = NA,
+				deviance_explained_mean = NA, deviance_explained_sd = NA,
+				tss_mean = NA, tss_sd = NA,
+				boyce_mean = NA, boyce_sd = NA
+			))
+		}
+
+		esm_objs <- readRDS(model_path)
+		result   <- summarise_esm_species(sp, esm_objs)
+
+		cat("  AUC:", round(result$cv_auc_mean, 3),
+		    " | TSS:", round(result$tss_mean, 3),
+		    " | Boyce:", round(result$boyce_mean, 3), "\n")
+
+		rm(esm_objs); gc()
+		return(result)
+	})
+
+	model_evaluation_summary <- bind_rows(
+		standard_brt_summary,
+		tuned_brt_summary,
+		esm_summary
+	) |>
+		arrange(modeling_tier, species)
+
+	print(model_evaluation_summary, n = 20, width = Inf)
+
+	## Save to CSV
+  	write_csv(
+  		model_evaluation_summary,
+  		file.path(OUTPUT_DIR, "model_evaluation_summary.csv")
+  	)
+
+
+	national_summary <- purrr::map_dfr(ALL_SPECIES, function(sp) {
+
+		sp_clean <- gsub(" ", "_", sp)
+
+		## Load baseline prediction raster
+		  baseline_path <- file.path(BASELINE_DIR, paste0(sp_clean, "_baseline.tif"))
+
+  		if (!file.exists(baseline_path)) {
+  			cat("  ⚠", sp, "— baseline raster not found, skipping\n")
+  			return(tibble(species = sp, national_mean = NA, national_sd = NA))
+  		}
+
+		pred_rast <- rast(baseline_path)
+
+		## For BRT species, predictions are 2-layer (mean, sd); use the mean layer
+		## For ESM species, predictions are 1-layer (mean)
+  		mean_rast <- if (nlyr(pred_rast) >= 2) pred_rast[[1]] else pred_rast
+  
+  		## Extract all non-NA values
+  		vals <- values(mean_rast, na.rm = TRUE)
+  
+  		## National-level summary statistics
+  		nat_mean <- mean(vals, na.rm = TRUE)
+  		nat_sd   <- sd(vals, na.rm = TRUE)
+  
+  		cat(sprintf("  %-30s  mean: %.4f  sd: %.4f\n", sp, nat_mean, nat_sd))
+  
+  		tibble(
+  			species       = sp,
+  			national_mean = round(nat_mean, 5),
+  			national_sd   = round(nat_sd, 5)
+  		)
+  	})
+  
+  	print(national_summary, n = 20, width = Inf)
+
+# PART 3: MUNICIPAL-LEVEL SUMMARIES
+
+	## Convert SpatVector to sf for exactextractr compatibility
+	  #georgia_sf <- st_as_sf(Georgia_adm2)
+
+    municipal_summary <- purrr::map_dfr(ALL_SPECIES, function(sp) {
+
+        sp_clean <- gsub(" ", "_", sp)
+        cat("  Processing:", sp, "...")
+
+        baseline_path <- file.path(BASELINE_DIR, paste0(sp_clean, "_baseline.tif"))
+
+        if (!file.exists(baseline_path)) {
+            cat(" ⚠ not found\n")
+            return(tibble(
+                species             = sp,
+                municipality_mapped = muni_boundaries$municipality_mapped,
+                municipal_mean      = NA_real_,
+                municipal_sd        = NA_real_
+            ))
+        }
+
+        pred_rast <- rast(baseline_path)
+
+        ## Use the mean prediction layer
+          mean_rast <- if (nlyr(pred_rast) >= 2) pred_rast[[1]] else pred_rast
+
+        ## Area-weighted mean suitability per municipality
+          muni_mean <- exact_extract(mean_rast, muni_boundaries, fun = "mean")
+
+        ## Area-weighted standard deviation per municipality
+          muni_sd   <- exact_extract(mean_rast, muni_boundaries, fun = "stdev")
+
+        tibble(
+            species             = sp,
+            municipality_mapped = muni_boundaries$municipality_mapped,
+            municipal_mean      = round(muni_mean, 5),
+            municipal_sd        = round(muni_sd, 5)
+        )
+    })
+
+  	cat("\n  Municipal summary rows:", nrow(municipal_summary), "\n")
+
+
+# PART 4: SAVE ALL OUTPUTS
+
+	## Model evaluation summary (performance metrics for all species)
+  	write_csv(
+  		model_evaluation_summary,
+  		file.path(OUTPUT_DIR, "model_evaluation_summary.csv")
+  	)
+  	cat("  ✓ model_evaluation_summary.csv\n")
+
+	## National landscape summary
+  	write_csv(
+  		national_summary,
+  		file.path(OUTPUT_DIR, "national_landscape_summary.csv")
+  	)
+  	cat("  ✓ national_landscape_summary.csv\n")
+
+  ## Municipal-level summary (long format)
+    write_csv(
+        municipal_summary,
+        file.path(OUTPUT_DIR, "municipal_baseline_summary.csv")
+    )
+    cat("  ✓ municipal_baseline_summary.csv\n")
+
+  ## Wide-format version
+    municipal_wide <- municipal_summary |>
+        dplyr::select(species, municipality_mapped, municipal_mean) |>
+        pivot_wider(
+            names_from   = species,
+            values_from  = municipal_mean,
+            names_prefix = "suit_"
+        )
+
+    write_csv(
+        municipal_wide,
+        file.path(OUTPUT_DIR, "municipal_baseline_summary_wide.csv")
+    )
+    cat("  ✓ municipal_baseline_summary_wide.csv\n")
+
+	cat("\nAll outputs saved to:", OUTPUT_DIR, "\n")
+
+
+```
+
+```{r maxSSS Thresholds and Landscape Proportion}
+
+  set.seed(1999)
+
+  # CONFIGURATION
+
+    ## Paths (consistent with prior chunks)
+      ONEDRIVE     <- "C:/Users/ianpsheasmith/OneDrive - University of Florida/General - Georgia Ticks/Georgia_Ticks"
+      BASELINE_DIR <- file.path(ONEDRIVE, "Paper2_Data/Predictions/Baseline")
+      OUTPUT_DIR   <- file.path(ONEDRIVE, "Paper2_Data/Summaries")
+      dir.create(OUTPUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+    ## Model directories
+      STANDARD_BRT_MODEL_DIR <- file.path(ONEDRIVE, "Paper2_Data/Predictions/Models")
+      TUNED_BRT_MODEL_DIR    <- file.path(ONEDRIVE, "Paper2_BRTs_New/Tuned_BRT_Results/models")
+      ESM_MODEL_DIR          <- file.path(ONEDRIVE, "Paper2_ESMs")
+
+    ## Species by tier
+      STANDARD_BRT_SPECIES <- c(
+        "Culex pipiens", "Ixodes ricinus", "Aedes albopictus",
+        "Dermacentor marginatus", "Dermacentor reticulatus", "Aedes caspius"
+      )
+
+      TUNED_BRT_SPECIES <- c(
+        "Aedes vexans", "Culex theileri",
+        "Haemaphysalis inermis", "Hyalomma marginatum"
+      )
+
+      ESM_SPECIES <- c(
+        "Aedes aegypti", "Aedes geniculatus",
+        "Anopheles maculipennis", "Anopheles plumbeus", "Anopheles sacharovi",
+        "Culex tritaeniorhynchus", "Culiseta annulata", "Culiseta longiareolata",
+        "Hyalomma aegyptium", "Rhipicephalus sanguineus"
+      )
+
+
+  # maxSSS COMPUTATION
+
+    #' Compute the maxSSS threshold from a vector of predictions and binary observed values
+    #' Evaluates candidate thresholds and returns the value maximising sensitivity + specificity
+      compute_maxsss <- function(preds, obs) {
+
+        pres_p <- preds[obs == 1]
+        abs_p  <- preds[obs == 0]
+
+        ## Generate candidate thresholds from the unique predicted values
+          cands <- sort(unique(preds[!is.na(preds)]))
+
+        ## Downsample candidates if the set is very large (speed optimisation)
+          if (length(cands) > 500) {
+            cands <- quantile(cands, seq(0, 1, length.out = 500), na.rm = TRUE)
+          }
+
+        ## Evaluate sensitivity + specificity at each candidate
+          ss <- purrr::map_dbl(cands, function(t) {
+            sum(pres_p >= t) / length(pres_p) + sum(abs_p < t) / length(abs_p)
+          })
+
+        cands[which.max(ss)]
+      }
+
+
+    #' Extract maxSSS from a single fitted gbm.step model object
+    #' Uses the training fitted values and observed response stored in the model
+      extract_brt_maxsss <- function(model) {
+
+        if (is.null(model)) return(NA_real_)
+
+        ## Recover fitted predictions and observed binary response
+          preds <- model$fitted
+          obs   <- model$gbm.call$dataframe[[model$gbm.call$gbm.y]]
+
+        compute_maxsss(preds, obs)
+      }
+
+
+  # PART 1: BRT THRESHOLDS (Standard + Tuned)
+  ## For each species, load the 100 saved model objects, compute maxSSS per
+  ## iteration, and summarise as mean ± SD across the ensemble
+
+    brt_threshold_specs <- bind_rows(
+      tibble(
+        species    = STANDARD_BRT_SPECIES,
+        tier       = "Standard_BRT",
+        model_dir  = STANDARD_BRT_MODEL_DIR,
+        file_suffix = "_models.rds"
+      ),
+      tibble(
+        species    = TUNED_BRT_SPECIES,
+        tier       = "Tuned_BRT",
+        model_dir  = TUNED_BRT_MODEL_DIR,
+        file_suffix = "_tuned_brt_models.rds"
       )
     )
 
-  # Load Georgia Shapefile
-    Georgia_adm2 <- geodata::gadm(
-        country = "GE", 
-        level = 2, 
-        path = "C:/Users/ianpsheasmith/Documents/GitHub/GeorgiaVectors/Shapefiles"
+    brt_thresholds <- purrr::pmap_dfr(brt_threshold_specs, function(species, tier, model_dir, file_suffix) {
+
+      sp_clean   <- gsub(" ", "_", species)
+      model_path <- file.path(model_dir, paste0(sp_clean, file_suffix))
+
+      cat(species, "(", tier, ") ...")
+
+      if (!file.exists(model_path)) {
+        cat(" ⚠ model file not found\n")
+        return(tibble(
+          species       = species,
+          modeling_tier = tier,
+          maxsss_mean   = NA_real_,
+          maxsss_sd     = NA_real_,
+          n_models      = NA_integer_
+        ))
+      }
+
+      ## Load the list of 100 gbm.step model objects
+        models <- readRDS(model_path)
+
+      ## Compute maxSSS from each valid iteration
+        iter_thresholds <- purrr::map_dbl(models, extract_brt_maxsss)
+
+      ## Remove NAs from failed iterations
+        valid_thresholds <- iter_thresholds[!is.na(iter_thresholds)]
+
+      cat(" ", length(valid_thresholds), "valid |",
+          "maxSSS:", round(mean(valid_thresholds), 4), "±",
+          round(sd(valid_thresholds), 4), "\n")
+
+      rm(models); gc()
+
+      tibble(
+        species       = species,
+        modeling_tier = tier,
+        maxsss_mean   = mean(valid_thresholds),
+        maxsss_sd     = sd(valid_thresholds),
+        n_models      = length(valid_thresholds)
+      )
+    })
+
+
+  # PART 2: ESM THRESHOLDS
+  ## These were already computed and saved during the ESM fitting pipeline;
+  ## retrieve them from the stored model objects
+
+    esm_thresholds <- purrr::map_dfr(ESM_SPECIES, function(sp) {
+
+      sp_clean   <- gsub(" ", "_", sp)
+      model_path <- file.path(ESM_MODEL_DIR, sp_clean, "esm_model_objects.rds")
+
+      cat(sp, "(ESM) ...")
+
+      if (!file.exists(model_path)) {
+        cat(" ⚠ model file not found\n")
+        return(tibble(
+          species       = sp,
+          modeling_tier = "ESM",
+          maxsss_mean   = NA_real_,
+          maxsss_sd     = NA_real_,
+          n_models      = NA_integer_
+        ))
+      }
+
+      esm_objs <- readRDS(model_path)
+
+      ## ESM pipeline saved a single maxSSS value (no per-iteration SD available)
+        maxsss_val <- esm_objs$thresholds$maxsss
+
+      cat(" maxSSS:", round(maxsss_val, 4), "\n")
+
+      tibble(
+        species       = sp,
+        modeling_tier = "ESM",
+        maxsss_mean   = maxsss_val,
+        maxsss_sd     = NA_real_,
+        n_models      = 1L
+      )
+    })
+
+
+  # COMBINE ALL THRESHOLDS
+
+    all_thresholds <- bind_rows(brt_thresholds, esm_thresholds) |>
+      arrange(modeling_tier, species)
+
+    cat("\n══════════════════════════════════════════════════════════════\n")
+    cat("  maxSSS THRESHOLDS — ALL SPECIES\n")
+    cat("══════════════════════════════════════════════════════════════\n\n")
+    print(all_thresholds, n = 20, width = Inf)
+
+
+  # PART 3: BINARY CLASSIFICATION + LANDSCAPE PROPORTION
+  ## Apply each species' mean maxSSS threshold to the baseline prediction raster
+  ## to classify every pixel as present (≥ threshold) or absent (< threshold),
+  ## then compute the proportion of the landscape classified as present
+
+    landscape_proportion <- purrr::pmap_dfr(all_thresholds, function(species, modeling_tier,
+                                                                       maxsss_mean, maxsss_sd,
+                                                                       n_models) {
+
+      sp_clean      <- gsub(" ", "_", species)
+      baseline_path <- file.path(BASELINE_DIR, paste0(sp_clean, "_baseline.tif"))
+
+      cat("  ", species, "...")
+
+      if (is.na(maxsss_mean) || !file.exists(baseline_path)) {
+        cat(" ⚠ skipped (missing threshold or raster)\n")
+        return(tibble(
+          species            = species,
+          modeling_tier      = modeling_tier,
+          maxsss_threshold   = maxsss_mean,
+          n_pixels_total     = NA_integer_,
+          n_pixels_present   = NA_integer_,
+          pct_landscape      = NA_real_
+        ))
+      }
+
+      ## Load baseline raster (BRT = 2-layer [mean, sd]; ESM = 1-layer)
+        pred_rast <- rast(baseline_path)
+        mean_rast <- if (nlyr(pred_rast) >= 2) pred_rast[[1]] else pred_rast
+
+      ## Binary classification: 1 if predicted probability ≥ threshold, else 0
+        binary_rast <- mean_rast >= maxsss_mean
+
+      ## Extract pixel counts (non-NA cells only)
+        all_vals     <- values(binary_rast, na.rm = TRUE)
+        n_total      <- length(all_vals)
+        n_present    <- sum(all_vals == 1)
+        pct_present  <- (n_present / n_total) * 100
+
+      cat(" ", round(pct_present, 2), "% present\n")
+
+      tibble(
+        species            = species,
+        modeling_tier      = modeling_tier,
+        maxsss_threshold   = round(maxsss_mean, 4),
+        n_pixels_total     = as.integer(n_total),
+        n_pixels_present   = as.integer(n_present),
+        pct_landscape      = round(pct_present, 2)
+      )
+    })
+
+
+  # RESULTS
+
+    cat("\n══════════════════════════════════════════════════════════════\n")
+    cat("  LANDSCAPE PROPORTION AT maxSSS — ALL SPECIES\n")
+    cat("══════════════════════════════════════════════════════════════\n\n")
+    print(landscape_proportion, n = 20, width = Inf)
+
+
+  # OPTIONAL: SAVE BINARY RASTERS
+  ## Writes a classified present/absent .tif for each species alongside the
+  ## continuous baseline predictions
+
+    BINARY_DIR <- file.path(ONEDRIVE, "Paper2_Data/Predictions/Binary_maxSSS")
+    dir.create(BINARY_DIR, showWarnings = FALSE, recursive = TRUE)
+
+    purrr::pwalk(
+      landscape_proportion |> dplyr::filter(!is.na(maxsss_threshold)),
+      function(species, modeling_tier, maxsss_threshold, ...) {
+
+        sp_clean      <- gsub(" ", "_", species)
+        baseline_path <- file.path(BASELINE_DIR, paste0(sp_clean, "_baseline.tif"))
+
+        pred_rast   <- rast(baseline_path)
+        mean_rast   <- if (nlyr(pred_rast) >= 2) pred_rast[[1]] else pred_rast
+        binary_rast <- mean_rast >= maxsss_threshold
+
+        names(binary_rast) <- "present"
+
+        writeRaster(
+          binary_rast,
+          file.path(BINARY_DIR, paste0(sp_clean, "_binary_maxsss.tif")),
+          overwrite = TRUE,
+          datatype  = "INT1U"
+        )
+      }
     )
 
+    cat("\nBinary rasters saved to:\n ", BINARY_DIR, "\n")
+
+
+  # SAVE SUMMARY TABLES
+
+    ## Thresholds table
+      write_csv(
+        all_thresholds,
+        file.path(OUTPUT_DIR, "maxsss_thresholds_all_species.csv")
+      )
+
+    ## Landscape proportion table
+      write_csv(
+        landscape_proportion,
+        file.path(OUTPUT_DIR, "landscape_proportion_at_maxsss.csv")
+      )
+
+    ## Combined table (merge thresholds with landscape stats)
+      combined_summary <- all_thresholds |>
+        left_join(
+          landscape_proportion |> dplyr::select(species, n_pixels_total, n_pixels_present, pct_landscape),
+          by = "species"
+        )
+
+      write_csv(
+        combined_summary,
+        file.path(OUTPUT_DIR, "maxsss_threshold_and_landscape_summary.csv")
+      )
+
+    cat("\nSummary tables saved to:\n ", OUTPUT_DIR, "\n")
 ```
 
 
